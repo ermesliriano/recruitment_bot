@@ -1,4 +1,6 @@
 # app/models.py
+from app.core import Base
+
 class Tenant(Base):
     __tablename__ = "tenants"
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
