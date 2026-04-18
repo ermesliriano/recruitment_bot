@@ -1,0 +1,13 @@
+# requirements.txt
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+pydantic-settings
+httpx
+phonenumbers
+pypdf
+pdf2image
+pillow
+pytesseract
+python-multipart
