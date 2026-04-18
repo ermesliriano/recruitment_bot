@@ -22,7 +22,6 @@ services:
         value: "5"
 
 databases:
-  - name: recruitment-db
+  - name: volunteerm-db
     plan: free
-    databaseName: recruitment
-    user: recruitment
+    databaseName: volunteerm-db
