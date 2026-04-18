@@ -8,6 +8,7 @@ from app.scoring import RecruitmentService
 from app.telegram_api import TelegramGateway, parse_telegram_update
 
 import traceback
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 webhook_router = APIRouter(prefix="/webhooks", tags=["webhooks"])
