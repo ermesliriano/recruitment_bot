@@ -32,6 +32,8 @@ async def telegram_webhook(tenant_slug: str, request: Request):
         text = message.get("text", "")
         chat_id = message.get("chat", {}).get("id")
 
+        tenant = None
+
         if not chat_id:
             return {"ok": True}
 
