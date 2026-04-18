@@ -1,13 +1,25 @@
 # app/models.py
+from __future__ import annotations
+
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
-    String, Text, Integer, Boolean, DateTime, Numeric
+    ARRAY,
+    BigInteger,
+    Boolean,
+    DateTime,
+    Enum as SAEnum,
+    Integer,
+    Numeric,
+    String,
+    Text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import (
-    UUID, JSONB, ARRAY
-)
+from sqlalchemy.dialects.postgresql import BYTEA, JSONB, UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import func
+
+from app.core import utcnow  # or wherever utcnow is defined
 
 from app.core import Base
 
