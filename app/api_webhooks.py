@@ -21,13 +21,13 @@ try:
 
     @webhook_router.post("/telegram/{tenant_slug}")
     def telegram_webhook(
-        print("Webhook hit")
         tenant_slug: str,
         payload: dict = Body(...),
         background_tasks: BackgroundTasks = None,
         x_secret: str | None = Header(None, alias="X-Telegram-Bot-Api-Secret-Token"),
         db=Depends(get_db),
     ):
+        print("Webhook hit")
         tenant = db.execute(select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True))).scalar_one_or_none()
         if not tenant:
             raise HTTPException(status_code=404, detail="tenant no encontrado")
