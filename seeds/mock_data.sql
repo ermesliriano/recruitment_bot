@@ -3,12 +3,12 @@ INSERT INTO tenants (
   id, slug, name, hr_email, telegram_bot_token, telegram_webhook_secret, settings_json
 ) VALUES (
   '11111111-1111-1111-1111-111111111111',
-  'acme',
-  'ACME Recruiting',
-  'rrhh@acme.test',
-  '5893294067:AAGXqXwLF1njIftX9O_HD8hNpuCMnrchbLg',
-  'telegram-secret-acme',
-  '{"brand":"ACME","notify_top_n":5}'::jsonb
+  'cesaria',
+  'Cesaria HR',
+  'rrhh@cesaria.test',
+  '8789717115:AAGMh8fDoEvB6tDW6R_b5nYCRqADF6PnNFM',
+  'telegram-secret-cesaria',
+  '{"brand":"Cesaria","notify_top_n":5}'::jsonb
 );
 
 INSERT INTO vacancies (
