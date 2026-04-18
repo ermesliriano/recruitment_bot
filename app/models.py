@@ -20,6 +20,19 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.core import utcnow  # or wherever utcnow is defined
+from app.models_enums import (  # adjust to your actual enum module
+    AnswerType,
+    AiEvalStatus,
+    ApplicationStatus,
+    ChatState,
+    Classification,
+    CvParseStatus,
+    Platform,
+    ScoringOperator,
+    SourceScope,
+    StorageBackendType,
+    VacancyStatus,
+)
 
 from app.core import Base
 
