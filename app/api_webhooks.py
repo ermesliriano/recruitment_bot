@@ -7,6 +7,9 @@ from app.models import Application, Candidate, Tenant, Vacancy
 from app.scoring import RecruitmentService
 from app.telegram_api import TelegramGateway, parse_telegram_update
 
+import traceback
+from fastapi.responses import JSONResponse
+
 webhook_router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 admin_router = APIRouter(prefix="/admin/v1", tags=["admin"])
 internal_router = APIRouter(prefix="/internal/v1", tags=["internal"])
@@ -14,10 +17,6 @@ internal_router = APIRouter(prefix="/internal/v1", tags=["internal"])
 def require_admin_token(x_admin_token: str | None = Header(None, alias="X-Admin-Token")):
     if x_admin_token != settings.admin_token:
         raise HTTPException(status_code=401, detail="admin token inválido")
-
-@webhook_router.post("/telegram/{tenant_slug}")
-import traceback
-from fastapi.responses import JSONResponse
 
 @webhook_router.post("/telegram/{tenant_slug}")
 async def telegram_webhook(tenant_slug: str, request: Request):
