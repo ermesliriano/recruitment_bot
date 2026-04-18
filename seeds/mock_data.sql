@@ -6,7 +6,7 @@ INSERT INTO tenants (
   'acme',
   'ACME Recruiting',
   'rrhh@acme.test',
-  'TELEGRAM_BOT_TOKEN_AQUI',
+  '5893294067:AAGXqXwLF1njIftX9O_HD8hNpuCMnrchbLg',
   'telegram-secret-acme',
   '{"brand":"ACME","notify_top_n":5}'::jsonb
 );
