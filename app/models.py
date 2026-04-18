@@ -1,4 +1,9 @@
 # app/models.py
+from typing import Any
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import String, Text, Integer, Boolean
+from sqlalchemy.dialects.postgresql import UUID
+
 from app.core import Base
 
 class Tenant(Base):
