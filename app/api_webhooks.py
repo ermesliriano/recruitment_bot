@@ -61,18 +61,31 @@ async def telegram_webhook(tenant_slug: str, request: Request):
             return {"ok": True}
 
         # 🔹 4. Aquí irá tu state machine    
-        event = parse_telegram_update(payload)
-        service = RecruitmentService()
-        tg = TelegramGateway(tenant.telegram_bot_token)
+        # event = parse_telegram_update(payload)
+        # service = RecruitmentService()
+        # tg = TelegramGateway(tenant.telegram_bot_token)
 
-        outgoing = service.dispatch(db, tenant, event, background_tasks)
-        db.commit()
+        # outgoing = service.dispatch(db, tenant, event, background_tasks)
+        # db.commit()
 
-        if event.callback_query_id:
-            tg.answer_callback_query(event.callback_query_id)
+        # if event.callback_query_id:
+            # tg.answer_callback_query(event.callback_query_id)
 
-        for msg in outgoing:
-            tg.send_message(event.chat_id, msg["text"], msg.get("reply_markup"))
+        # for msg in outgoing:
+            # tg.send_message(event.chat_id, msg["text"], msg.get("reply_markup"))
+
+        # return {"ok": True}
+        # después de obtener chat_id
+
+        import requests
+
+        requests.post(
+            f"https://api.telegram.org/bot{tenant.telegram_bot_token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": f"Recibí tu mensaje: {text}"
+            }
+        )
 
         return {"ok": True}
 
