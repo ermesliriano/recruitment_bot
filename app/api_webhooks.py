@@ -21,10 +21,35 @@ def require_admin_token(x_admin_token: str | None = Header(None, alias="X-Admin-
 
 @webhook_router.post("/telegram/{tenant_slug}")
 async def telegram_webhook(tenant_slug: str, request: Request):
+    from app.core import SessionLocal
+    import traceback
+    from fastapi.responses import JSONResponse
+
+    db = SessionLocal()
+    tenant = None
+
     try:
         payload = await request.json()
 
-        # ---- DEBUG: valida entrada mínima ----
+        # 🔹 1. Obtener tenant PRIMERO
+        tenant = db.query(Tenant).filter(Tenant.slug == tenant_slug).first()
+
+        if not tenant:
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Tenant not found: {tenant_slug}"}
+            )
+
+        # 🔹 2. Validar secret
+        secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+
+        if secret != tenant.telegram_webhook_secret:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "secret telegram inválido"}
+            )
+
+        # 🔹 3. Procesar payload
         message = payload.get("message") or payload.get("callback_query", {}).get("message")
         if not message:
             return {"ok": True}
@@ -32,30 +57,11 @@ async def telegram_webhook(tenant_slug: str, request: Request):
         text = message.get("text", "")
         chat_id = message.get("chat", {}).get("id")
 
-        tenant = None
-
         if not chat_id:
             return {"ok": True}
 
-        # ---- TU LÓGICA NORMAL ----
-            tenant = db.execute(select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True))).scalar_one_or_none()
-        if not tenant:
-            raise HTTPException(status_code=404, detail="tenant no encontrado")
-        if tenant.telegram_webhook_secret and x_secret != tenant.telegram_webhook_secret:
-            raise HTTPException(status_code=401, detail="secret telegram inválido")
-
-        event = parse_telegram_update(payload)
-        service = RecruitmentService()
-        tg = TelegramGateway(tenant.telegram_bot_token)
-
-        outgoing = service.dispatch(db, tenant, event, background_tasks)
-        db.commit()
-
-        if event.callback_query_id:
-            tg.answer_callback_query(event.callback_query_id)
-
-        for msg in outgoing:
-            tg.send_message(event.chat_id, msg["text"], msg.get("reply_markup"))
+        # 🔹 4. Aquí irá tu state machine
+        print(f"Message received: {text} from {chat_id}")
 
         return {"ok": True}
 
@@ -67,6 +73,9 @@ async def telegram_webhook(tenant_slug: str, request: Request):
                 "trace": traceback.format_exc()
             }
         )
+
+    finally:
+        db.close()
 
 @internal_router.post("/tenants/{tenant_id}/telegram/set-webhook", dependencies=[Depends(require_admin_token)])
 def set_telegram_webhook(tenant_id: str, public_base_url: str, db=Depends(get_db)):
