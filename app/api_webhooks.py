@@ -20,7 +20,7 @@ def require_admin_token(x_admin_token: str | None = Header(None, alias="X-Admin-
         raise HTTPException(status_code=401, detail="admin token inválido")
 
 @webhook_router.post("/telegram/{tenant_slug}")
-async def telegram_webhook(tenant_slug: str, request: Request):
+async def telegram_webhook(tenant_slug: str, request: Request, background_tasks: BackgroundTasks = None):
     from app.core import SessionLocal
     import traceback
     from fastapi.responses import JSONResponse
@@ -75,19 +75,6 @@ async def telegram_webhook(tenant_slug: str, request: Request):
             tg.send_message(event.chat_id, msg["text"], msg.get("reply_markup"))
 
         return {"ok": True}
-        # después de obtener chat_id
-
-        # import requests
-
-        # requests.post(
-            # f"https://api.telegram.org/bot{tenant.telegram_bot_token}/sendMessage",
-            # json={
-                # "chat_id": chat_id,
-                # "text": f"Recibí tu mensaje: {text}"
-            # }
-        # )
-
-        # return {"ok": True}
 
     except Exception as e:
         return JSONResponse(
