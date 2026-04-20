@@ -16,18 +16,21 @@ class IncomingEvent:
     document: dict[str, Any] | None = None
 
 def parse_telegram_update(payload: dict[str, Any]) -> IncomingEvent:
+    update_id = payload.get("update_id", 0)
+
     if "callback_query" in payload:
         cq = payload["callback_query"]
-        msg = cq["message"]
+        msg = cq.get("message", {})
         return IncomingEvent(
-            update_id=payload["update_id"],
-            chat_id=msg["chat"]["id"],
-            user_id=cq["from"]["id"],
+            update_id=update_id,
+            chat_id=msg.get("chat", {}).get("id"),
+            user_id=cq.get("from", {}).get("id"),
             callback_data=cq.get("data"),
             callback_query_id=cq.get("id"),
         )
 
-    msg = payload["message"]
+    msg = payload.get("message", {})
+
     doc = None
     if "document" in msg:
         d = msg["document"]
@@ -53,8 +56,8 @@ def parse_telegram_update(payload: dict[str, Any]) -> IncomingEvent:
         contact_phone = msg["contact"].get("phone_number")
 
     return IncomingEvent(
-        update_id=payload["update_id"],
-        chat_id=msg["chat"]["id"],
+        update_id=update_id,
+        chat_id=msg.get("chat", {}).get("id"),
         user_id=msg.get("from", {}).get("id"),
         text=msg.get("text"),
         contact_phone=contact_phone,
