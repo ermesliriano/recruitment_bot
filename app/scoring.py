@@ -192,7 +192,7 @@ class RecruitmentService:
     def _show_vacancies(self, db, tenant, session):
         vacancies = db.execute(
             select(Vacancy.id, Vacancy.title)
-            .where(Vacancy.tenant_id == tenant.id, Vacancy.status == "active")
+            .where(Vacancy.tenant_id == tenant.id, Vacancy.status == "ACTIVE")
             .order_by(Vacancy.created_at.desc())
         ).all()
         if not vacancies:

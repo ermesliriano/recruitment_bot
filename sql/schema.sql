@@ -1,17 +1,17 @@
 --sql/schema.sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TYPE platform_enum AS ENUM ('telegram', 'whatsapp');
-CREATE TYPE vacancy_status_enum AS ENUM ('draft', 'active', 'archived');
-CREATE TYPE answer_type_enum AS ENUM ('text', 'boolean', 'number');
-CREATE TYPE scoring_operator_enum AS ENUM ('equals', 'contains', 'gte');
-CREATE TYPE source_scope_enum AS ENUM ('answer', 'candidate', 'ai');
+ CREATE TYPE platform_enum AS ENUM ('TELEGRAM', 'WHATSAPP');
+CREATE TYPE vacancy_status_enum AS ENUM ('DRAFT', 'ACTIVE', 'ARCHIVED');
+CREATE TYPE answer_type_enum AS ENUM ('TEXT', 'BOOLEAN', 'NUMBER');
+CREATE TYPE scoring_operator_enum AS ENUM ('EQUALS', 'CONTAINS', 'GTE');
+CREATE TYPE source_scope_enum AS ENUM ('ANSWER', 'CANDIDATE', 'AI');
 CREATE TYPE application_status_enum AS ENUM (
-  'draft', 'in_progress', 'pending_ai', 'scoring',
-  'review', 'interview', 'shortlist',
-  'rejected', 'needs_human', 'closed'
+  'DRAFT', 'IN_PROGRESS', 'PENDING_AI', 'SCORING',
+  'REVIEW', 'INTERVIEW', 'SHORTLIST',
+  'REJECTED', 'NEEDS_HUMAN', 'CLOSED'
 );
-CREATE TYPE classification_enum AS ENUM ('reject', 'review', 'interview', 'shortlist');
+CREATE TYPE classification_enum AS ENUM ('REJECT', 'REVIEW', 'INTERVIEW', 'SHORTLIST');
 CREATE TYPE state_enum AS ENUM (
   'WELCOME',
   'SELECT_VACANCY',
@@ -23,9 +23,9 @@ CREATE TYPE state_enum AS ENUM (
   'CONFIRM_AND_CLOSE',
   'ESCALATE_HUMAN'
 );
-CREATE TYPE cv_parse_status_enum AS ENUM ('pending', 'parsed', 'ocr_fallback', 'failed', 'unsupported');
-CREATE TYPE ai_eval_status_enum AS ENUM ('pending', 'success', 'failed');
-CREATE TYPE storage_backend_enum AS ENUM ('db_blob', 'local_fs', 's3');
+CREATE TYPE cv_parse_status_enum AS ENUM ('PENDING', 'PARSED', 'OCR_FALLBACK', 'FAILED', 'UNSUPPORTED');
+CREATE TYPE ai_eval_status_enum AS ENUM ('PENDING', 'SUCCESS', 'FAILED');
+CREATE TYPE storage_backend_enum AS ENUM ('DB_BLOB', 'LOCAL_FS', 'S3');
 
 CREATE TABLE tenants (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -58,7 +58,7 @@ CREATE TABLE vacancies (
   faq_context JSONB NOT NULL DEFAULT '{"items":[]}'::jsonb,
   cv_score_factor NUMERIC(6,2) NOT NULL DEFAULT 6.00,
   classification_thresholds JSONB NOT NULL DEFAULT '{"review":35,"interview":60,"shortlist":75}'::jsonb,
-  status vacancy_status_enum NOT NULL DEFAULT 'draft',
+  status vacancy_status_enum NOT NULL DEFAULT 'DRAFT',
   opens_at TIMESTAMPTZ,
   closes_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -102,7 +102,7 @@ CREATE TABLE scoring_rules (
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   vacancy_id UUID NOT NULL REFERENCES vacancies(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  source_scope source_scope_enum NOT NULL DEFAULT 'answer',
+  source_scope source_scope_enum NOT NULL DEFAULT 'ANSWER',
   field_key TEXT NOT NULL,
   operator scoring_operator_enum NOT NULL,
   expected_text TEXT,
@@ -137,7 +137,7 @@ CREATE TABLE applications (
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
   vacancy_id UUID NOT NULL REFERENCES vacancies(id) ON DELETE CASCADE,
-  status application_status_enum NOT NULL DEFAULT 'draft',
+  status application_status_enum NOT NULL DEFAULT 'DRAFT',
   score_rules NUMERIC(8,2) NOT NULL DEFAULT 0,
   score_cv NUMERIC(4,2),
   score_total NUMERIC(8,2),
@@ -179,11 +179,11 @@ CREATE TABLE cv_documents (
   sha256 TEXT NOT NULL,
   telegram_file_id TEXT,
   telegram_file_unique_id TEXT,
-  storage_backend storage_backend_enum NOT NULL DEFAULT 'db_blob',
+  storage_backend storage_backend_enum NOT NULL DEFAULT 'DB_BLOB',
   storage_key TEXT NOT NULL,
   content BYTEA,
   extracted_text TEXT,
-  parse_status cv_parse_status_enum NOT NULL DEFAULT 'pending',
+  parse_status cv_parse_status_enum NOT NULL DEFAULT 'PENDING',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (application_id, version)
 );
@@ -195,7 +195,7 @@ CREATE TABLE ai_evaluations (
   cv_document_id UUID NOT NULL REFERENCES cv_documents(id) ON DELETE CASCADE,
   llm_provider TEXT NOT NULL DEFAULT 'apifreellm',
   model_name TEXT NOT NULL DEFAULT 'apifreellm',
-  status ai_eval_status_enum NOT NULL DEFAULT 'pending',
+  status ai_eval_status_enum NOT NULL DEFAULT 'PENDING',
   raw_response TEXT,
   parsed_json JSONB,
   candidate_profile JSONB,
