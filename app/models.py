@@ -19,8 +19,9 @@ from sqlalchemy.dialects.postgresql import BYTEA, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
-from app.core import utcnow  # or wherever utcnow is defined
-from app.models_enums import (  # adjust to your actual enum module
+from app.core import (
+    Base,
+    utcnow,
     AnswerType,
     AiEvalStatus,
     ApplicationStatus,
@@ -33,8 +34,6 @@ from app.models_enums import (  # adjust to your actual enum module
     StorageBackendType,
     VacancyStatus,
 )
-
-from app.core import Base
 
 class Tenant(Base):
     __tablename__ = "tenants"
