@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import case, select
 
 from app.core import (
-    ApplicationStatus, ChatState, Classification, Platform,ScoringOperator, SourceScope,
+    ApplicationStatus, ChatState, Classification, Platform, ScoringOperator, SourceScope,
     SessionLocal, settings
 )
 from app.models import (
@@ -112,7 +112,7 @@ class RecruitmentService:
             return session
         session = ConversationSession(
             tenant_id=tenant_id,
-            platform=Platform.TELEGRAM.value,
+            platform=Platform.TELEGRAM,
             platform_chat_id=chat_id,
             platform_user_id=user_id,
             current_state=ChatState.WELCOME,

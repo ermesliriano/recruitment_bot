@@ -1,3 +1,4 @@
+--sql/schema.sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TYPE platform_enum AS ENUM ('telegram', 'whatsapp');
@@ -214,7 +215,7 @@ CREATE TABLE ai_evaluations (
 CREATE TABLE conversation_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  platform platform_enum NOT NULL DEFAULT 'telegram',
+  platform platform_enum NOT NULL DEFAULT 'TELEGRAM',
   platform_chat_id BIGINT NOT NULL,
   platform_user_id BIGINT,
   candidate_id UUID REFERENCES candidates(id) ON DELETE SET NULL,
