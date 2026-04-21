@@ -38,7 +38,7 @@ from app.core import (
 
 class Tenant(Base):
     __tablename__ = "tenants"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255))
     hr_email: Mapped[str | None] = mapped_column(String(255))
@@ -49,7 +49,7 @@ class Tenant(Base):
 
 class Vacancy(Base):
     __tablename__ = "vacancies"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     code: Mapped[str] = mapped_column(String(80))
     title: Mapped[str] = mapped_column(String(255))
@@ -69,7 +69,7 @@ class Vacancy(Base):
 
 class Question(Base):
     __tablename__ = "questions"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     code: Mapped[str] = mapped_column(String(80))
     prompt_text: Mapped[str] = mapped_column(Text)
@@ -78,7 +78,7 @@ class Question(Base):
 
 class VacancyQuestion(Base):
     __tablename__ = "vacancy_questions"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     vacancy_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     question_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
@@ -92,7 +92,7 @@ class VacancyQuestion(Base):
 
 class ScoringRule(Base):
     __tablename__ = "scoring_rules"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     vacancy_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     name: Mapped[str] = mapped_column(String(255))
@@ -109,7 +109,7 @@ class ScoringRule(Base):
 
 class Candidate(Base):
     __tablename__ = "candidates"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     phone_e164: Mapped[str] = mapped_column(String(32), index=True)
     full_name: Mapped[str | None] = mapped_column(String(255))
@@ -121,7 +121,7 @@ class Candidate(Base):
 
 class Application(Base):
     __tablename__ = "applications"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     candidate_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     vacancy_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
@@ -136,7 +136,7 @@ class Application(Base):
 
 class Answer(Base):
     __tablename__ = "answers"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     application_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     vacancy_question_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
@@ -149,7 +149,7 @@ class Answer(Base):
 
 class CvDocument(Base):
     __tablename__ = "cv_documents"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     application_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     version: Mapped[int] = mapped_column(Integer)
@@ -168,7 +168,7 @@ class CvDocument(Base):
 
 class AiEvaluation(Base):
     __tablename__ = "ai_evaluations"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     application_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     cv_document_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
