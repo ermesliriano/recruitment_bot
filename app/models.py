@@ -185,7 +185,7 @@ class AiEvaluation(Base):
 
 class ConversationSession(Base):
     __tablename__ = "conversation_sessions"
-    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     platform: Mapped[Platform] = mapped_column(SAEnum(Platform, name="platform_enum"))
     platform_chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
