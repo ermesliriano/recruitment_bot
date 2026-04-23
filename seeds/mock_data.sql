@@ -38,15 +38,15 @@ INSERT INTO vacancies (
   }'::jsonb,
   6.00,
   '{"review":35,"interview":60,"shortlist":75}'::jsonb,
-  'active'
+  'ACTIVE'
 );
 
 INSERT INTO questions (id, tenant_id, code, prompt_text, answer_type, default_validation) VALUES
-('30000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'work_permit', '¿Tienes permiso de trabajo vigente?', 'boolean', '{"true_values":["si","sí"],"false_values":["no"]}'::jsonb),
-('30000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'years_fastapi', '¿Cuántos años de experiencia tienes con FastAPI?', 'number', '{"min":0,"max":50}'::jsonb),
-('30000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'years_postgres', '¿Cuántos años de experiencia tienes con PostgreSQL?', 'number', '{"min":0,"max":50}'::jsonb),
-('30000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', 'english_level', '¿Cuál es tu nivel de inglés?', 'text', '{"min_len":1,"max_len":20}'::jsonb),
-('30000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', 'oncall_available', '¿Puedes entrar en guardias puntuales?', 'boolean', '{"true_values":["si","sí"],"false_values":["no"]}'::jsonb);
+('30000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'work_permit', '¿Tienes permiso de trabajo vigente?', 'BOOLEAN', '{"true_values":["si","sí"],"false_values":["no"]}'::jsonb),
+('30000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'years_fastapi', '¿Cuántos años de experiencia tienes con FastAPI?', 'NUMBER', '{"min":0,"max":50}'::jsonb),
+('30000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'years_postgres', '¿Cuántos años de experiencia tienes con PostgreSQL?', 'NUMBER', '{"min":0,"max":50}'::jsonb),
+('30000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', 'english_level', '¿Cuál es tu nivel de inglés?', 'TEXT', '{"min_len":1,"max_len":20}'::jsonb),
+('30000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', 'oncall_available', '¿Puedes entrar en guardias puntuales?', 'BOOLEAN', '{"true_values":["si","sí"],"false_values":["no"]}'::jsonb);
 
 INSERT INTO vacancy_questions (
   id, tenant_id, vacancy_id, question_id, question_order, field_key, validation, required, scoring_enabled
@@ -61,8 +61,8 @@ INSERT INTO scoring_rules (
   id, tenant_id, vacancy_id, name, source_scope, field_key, operator,
   expected_text, expected_number, expected_boolean, points, is_disqualifier, priority
 ) VALUES
-('50000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Sin permiso de trabajo', 'answer', 'work_permit', 'equals', NULL, NULL, false, 0, true, 1),
-('50000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'FastAPI 2+ años', 'answer', 'years_fastapi', 'gte', NULL, 2, NULL, 8, false, 10),
-('50000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'PostgreSQL 2+ años', 'answer', 'years_postgres', 'gte', NULL, 2, NULL, 6, false, 20),
-('50000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Inglés B2', 'answer', 'english_level', 'contains', 'b2', NULL, NULL, 3, false, 30),
-('50000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Disponible para guardias', 'answer', 'oncall_available', 'equals', NULL, NULL, true, 2, false, 40);
+('50000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Sin permiso de trabajo', 'ANSWER', 'work_permit', 'EQUALS', NULL, NULL, false, 0, true, 1),
+('50000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'FastAPI 2+ años', 'ANSWER', 'years_fastapi', 'gte', NULL, 2, NULL, 8, false, 10),
+('50000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'PostgreSQL 2+ años', 'ANSWER', 'years_postgres', 'gte', NULL, 2, NULL, 6, false, 20),
+('50000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Inglés B2', 'ANSWER', 'english_level', 'contains', 'b2', NULL, NULL, 3, false, 30),
+('50000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Disponible para guardias', 'ANSWER', 'oncall_available', 'EQUALS', NULL, NULL, true, 2, false, 40);

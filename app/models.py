@@ -199,3 +199,22 @@ class ConversationSession(Base):
     last_incoming_update_id: Mapped[int | None] = mapped_column(BigInteger)
     invalid_input_count: Mapped[int] = mapped_column(Integer, default=0)
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+class SystemLog(Base):
+    __tablename__ = "system_logs"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+
+    tenant_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
+    level: Mapped[str] = mapped_column(String)
+    source: Mapped[str] = mapped_column(String)
+    event: Mapped[str] = mapped_column(String)
+
+    message: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict | None] = mapped_column(JSONB)
+    traceback: Mapped[str | None] = mapped_column(Text)
+
+    application_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
+    conversation_session_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
+
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
