@@ -32,15 +32,6 @@ async def telegram_webhook(tenant_slug: str, request: Request, background_tasks:
     try:
         payload = await request.json()
 
-        log_event(
-            db,
-            level="INFO",
-            source="webhook",
-            event="INCOMING_UPDATE",
-            payload=payload,
-            tenant_id=tenant.id,
-        )
-
         # 🔹 1. Obtener tenant PRIMERO
         tenant = db.query(Tenant).filter(Tenant.slug == tenant_slug).first()
 
@@ -49,6 +40,15 @@ async def telegram_webhook(tenant_slug: str, request: Request, background_tasks:
                 status_code=404,
                 content={"error": f"Tenant not found: {tenant_slug}"}
             )
+
+        log_event(
+            db,
+            level="INFO",
+            source="webhook",
+            event="INCOMING_UPDATE",
+            payload=payload,
+            tenant_id=tenant.id,
+        )
 
         # 🔹 2. Validar secret
         secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
