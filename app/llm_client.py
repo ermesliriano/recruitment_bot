@@ -8,6 +8,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core import settings
+from app.logger import log_event
 
 class LlmEvaluationPayload(BaseModel):
     candidate_profile: dict[str, Any] = Field(default_factory=dict)

@@ -15,6 +15,7 @@ from sqlalchemy import select, func
 from app.core import SessionLocal, settings
 from app.models import CvDocument
 from app.core import CvParseStatus, StorageBackendType
+from app.logger import log_event
 
 ALLOWED_MIME = {
     "application/pdf": ".pdf",

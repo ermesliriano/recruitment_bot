@@ -1,4 +1,6 @@
 # app/telegram_api.py
+from app.logger import log_event
+
 import httpx
 import json
 from dataclasses import dataclass

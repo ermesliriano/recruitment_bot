@@ -17,6 +17,7 @@ from app.models import (
 from app.cv_pipeline import get_storage, next_cv_version, normalize_phone, sha256_bytes, validate_cv, extract_cv_text
 from app.llm_client import LlmClient
 from app.telegram_api import TelegramGateway, IncomingEvent
+from app.logger import log_event
 
 logger = logging.getLogger("recruitment")
 
@@ -481,6 +482,21 @@ class RecruitmentService:
         return Classification.REJECT, total
 
     def apply_scoring(self, db, app: Application, session: ConversationSession):
+    
+        log_event(
+            db,
+            level="INFO",
+            source="scoring",
+            event="FINAL_SCORE",
+            payload={
+                "score_rules": str(score_rules),
+                "score_cv": str(score_cv),
+                "total": str(total),
+                "classification": classification.value,
+            },
+            application_id=app.id,
+        )
+                
         vacancy = db.execute(select(Vacancy).where(Vacancy.id == app.vacancy_id)).scalar_one()
         answers = db.execute(select(Answer).where(Answer.application_id == app.id)).scalars().all()
         ai_eval = db.execute(select(AiEvaluation).where(AiEvaluation.application_id == app.id)).scalar_one_or_none()
