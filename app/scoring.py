@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import case, select
 
 from app.core import (
-    ApplicationStatus, ChatState, Classification, Platform, ScoringOperator, SourceScope,
+    ApplicationStatus, AiEvalStatus, ChatState, Classification, Platform, ScoringOperator, SourceScope,
     SessionLocal, settings
 )
 from app.models import (
@@ -885,9 +885,12 @@ class RecruitmentService:
 
                 except Exception as exc:
 
-                    ai_eval.status = AiEvalStatus.FAILED
-                    ai_eval.error_message = str(exc)
-                    ai_eval.attempts += 1
+                    try:
+                        ai_eval.status = AiEvalStatus.FAILED
+                        ai_eval.error_message = str(exc)
+                        ai_eval.attempts += 1
+                    except Exception:
+                        pass  # nunca romper logging
 
                     log_event(
                         db=db,
@@ -898,6 +901,10 @@ class RecruitmentService:
                         exc=exc,
                         application_id=app.id
                     )
+                    
+                    if ai_eval.status == AiEvalStatus.FAILED:
+                        db.commit()
+                        return
 
                 # =========================
                 # TRIGGER SCORING
