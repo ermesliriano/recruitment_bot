@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core import settings
 from app.logger import log_event
+from app.core import SessionLocal
 
 class LlmEvaluationPayload(BaseModel):
     candidate_profile: dict[str, Any] = Field(default_factory=dict)
@@ -97,6 +98,7 @@ class LlmClient:
                 validated = LlmEvaluationPayload.model_validate(obj)
                 return validated, raw, latency_ms
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+                db = SessionLocal()
                 log_event(
                     db,
                     level="ERROR",
