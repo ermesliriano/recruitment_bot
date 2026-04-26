@@ -1,10 +1,9 @@
 import traceback
-from sqlalchemy import insert
-from app.models import SystemLog  # crea modelo
+from app.models import SystemLog
 from app.core import SessionLocal
 
 def log_event(
-    db=None,
+    db=None,  # mantenido por compatibilidad, ya no se usa para escribir
     *,
     level: str,
     source: str,
@@ -16,8 +15,10 @@ def log_event(
     conversation_session_id=None,
     exc: Exception = None,
 ):
-    if db is None:
-        return
+    """Escribe un log en su propia sesión y hace commit inmediato,
+    de modo que el registro sobrevive aunque la transacción llamante
+    haga rollback."""
+    log_db = SessionLocal()
     try:
         log = SystemLog(
             tenant_id=tenant_id,
@@ -30,8 +31,12 @@ def log_event(
             application_id=application_id,
             conversation_session_id=conversation_session_id,
         )
-        db.add(log)
-        db.flush()
+        log_db.add(log)
+        log_db.commit()
     except Exception:
-        # Nunca romper el flujo por logging
-        pass
+        try:
+            log_db.rollback()
+        except Exception:
+            pass
+    finally:
+        log_db.close()
