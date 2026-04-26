@@ -329,6 +329,7 @@ class RecruitmentService:
         questions = self._get_ordered_questions(db, app.vacancy_id)
         idx = int(session.state_payload.get("question_index", 0))
         if idx >= len(questions):
+            db.commit()
             self.transition(session, ChatState.SCORING)
             return self.apply_scoring(db, app, session)
 
@@ -365,6 +366,7 @@ class RecruitmentService:
                 field_key=vq.field_key,
             )
             db.add(answer)
+            db.flush()
 
         answer.answer_text = answer_text
         answer.answer_number = answer_number
