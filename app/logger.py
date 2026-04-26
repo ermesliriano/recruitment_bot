@@ -4,7 +4,7 @@ from app.models import SystemLog  # crea modelo
 from app.core import SessionLocal
 
 def log_event(
-    db = SessionLocal(),
+    db=None,
     *,
     level: str,
     source: str,
@@ -16,6 +16,8 @@ def log_event(
     conversation_session_id=None,
     exc: Exception = None,
 ):
+    if db is None:
+        return
     try:
         log = SystemLog(
             tenant_id=tenant_id,

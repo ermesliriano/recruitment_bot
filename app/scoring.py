@@ -411,262 +411,262 @@ class RecruitmentService:
             return Classification.REVIEW, total
         return Classification.REJECT, total
 
-def apply_scoring(self, db, app: Application, session: ConversationSession):
-
-    log_event(
-        db=db,
-        level="INFO",
-        source="scoring",
-        event="SCORING_START",
-        message="Starting scoring process",
-        application_id=app.id,
-        conversation_session_id=session.id
-    )
-
-    try:
-        vacancy = db.execute(
-            select(Vacancy).where(Vacancy.id == app.vacancy_id)
-        ).scalar_one()
-
-        answers = db.execute(
-            select(Answer).where(Answer.application_id == app.id)
-        ).scalars().all()
-
-        ai_eval = db.execute(
-            select(AiEvaluation).where(AiEvaluation.application_id == app.id)
-        ).scalar_one_or_none()
-
-        # =========================
-        # VALIDACIÓN RESPUESTAS
-        # =========================
-        required_ids = db.execute(
-            select(VacancyQuestion.id).where(
-                VacancyQuestion.vacancy_id == app.vacancy_id,
-                VacancyQuestion.required.is_(True)
-            )
-        ).scalars().all()
-
-        answered_ids = db.execute(
-            select(Answer.vacancy_question_id).where(
-                Answer.application_id == app.id
-            )
-        ).scalars().all()
-
-        missing = set(required_ids) - set(answered_ids)
+    def apply_scoring(self, db, app: Application, session: ConversationSession):
 
         log_event(
             db=db,
             level="INFO",
             source="scoring",
-            event="ANSWER_VALIDATION",
-            payload={
-                "required": len(required_ids),
-                "answered": len(answered_ids),
-                "missing": list(map(str, missing))
-            },
-            application_id=app.id
-        )
-
-        if missing:
-            app.status = ApplicationStatus.IN_PROGRESS
-
-            return [{
-                "text": "Aún faltan respuestas para completar la postulación."
-            }]
-
-        # =========================
-        # VALIDACIÓN AI
-        # =========================
-        if not ai_eval:
-            log_event(
-                db=db,
-                level="WARNING",
-                source="scoring",
-                event="AI_EVAL_MISSING",
-                message="AI evaluation not found",
-                application_id=app.id
-            )
-
-            app.status = ApplicationStatus.SCORING
-
-            return [{
-                "text": "Procesando tu CV..."
-            }]
-
-        if ai_eval.status == "pending":
-            log_event(
-                db=db,
-                level="INFO",
-                source="scoring",
-                event="AI_PENDING",
-                message="AI evaluation still pending",
-                application_id=app.id
-            )
-
-            app.status = ApplicationStatus.SCORING
-
-            return [{
-                "text": "Estoy analizando tu CV..."
-            }]
-
-        if ai_eval.status == "failed":
-            log_event(
-                db=db,
-                level="ERROR",
-                source="scoring",
-                event="AI_FAILED",
-                message="AI evaluation failed",
-                application_id=app.id
-            )
-
-            return self.escalate_human(
-                db,
-                None,
-                session,
-                "Falló la evaluación IA del CV"
-            )
-
-        # =========================
-        # MAPEO RESPUESTAS
-        # =========================
-        answer_map = {}
-
-        for a in answers:
-            if a.answer_boolean is not None:
-                answer_map[a.field_key] = a.answer_boolean
-            elif a.answer_number is not None:
-                answer_map[a.field_key] = a.answer_number
-            else:
-                answer_map[a.field_key] = a.answer_text or ""
-
-        candidate = db.execute(
-            select(Candidate).where(Candidate.id == app.candidate_id)
-        ).scalar_one()
-
-        rules = db.execute(
-            select(ScoringRule)
-            .where(
-                ScoringRule.vacancy_id == app.vacancy_id,
-                ScoringRule.is_active.is_(True)
-            )
-            .order_by(ScoringRule.priority.asc())
-        ).scalars().all()
-
-        score_rules = Decimal("0")
-        is_disqualified = False
-        disqualification_reason = None
-
-        # =========================
-        # EVALUACIÓN REGLAS
-        # =========================
-        for rule in rules:
-
-            if rule.source_scope == SourceScope.ANSWER:
-                current = answer_map.get(rule.field_key)
-
-            elif rule.source_scope == SourceScope.CANDIDATE:
-                current = getattr(candidate, rule.field_key, None)
-
-            else:
-                current = (ai_eval.parsed_json or {}).get(rule.field_key)
-
-            matched = self.compare_rule(current, rule)
-
-            log_event(
-                db=db,
-                level="DEBUG",
-                source="scoring",
-                event="RULE_EVALUATION",
-                payload={
-                    "rule": rule.name,
-                    "field": rule.field_key,
-                    "value": str(current),
-                    "matched": matched
-                },
-                application_id=app.id
-            )
-
-            if matched and rule.is_disqualifier:
-                is_disqualified = True
-                disqualification_reason = rule.name
-                break
-
-            if matched:
-                score_rules += Decimal(rule.points)
-
-        # =========================
-        # SCORE FINAL
-        # =========================
-        score_cv = Decimal(str(ai_eval.cv_score_0_10 or 0))
-
-        classification, total = self.classify_candidate(
-            vacancy,
-            score_rules,
-            score_cv,
-            is_disqualified
-        )
-
-        app.score_rules = score_rules
-        app.score_cv = score_cv
-        app.score_total = total
-        app.classification = classification
-        app.is_disqualified = is_disqualified
-        app.disqualification_reason = disqualification_reason
-
-        if classification == Classification.SHORTLIST:
-            app.status = ApplicationStatus.SHORTLIST
-        elif classification == Classification.INTERVIEW:
-            app.status = ApplicationStatus.INTERVIEW
-        elif classification == Classification.REVIEW:
-            app.status = ApplicationStatus.REVIEW
-        else:
-            app.status = ApplicationStatus.REJECTED
-
-        # =========================
-        # TRANSICIÓN FINAL
-        # =========================
-        self.transition(session, ChatState.CONFIRM_AND_CLOSE)
-
-        log_event(
-            db=db,
-            level="INFO",
-            source="scoring",
-            event="SCORING_COMPLETE",
-            payload={
-                "score_rules": float(score_rules),
-                "score_cv": float(score_cv),
-                "score_total": float(total),
-                "classification": classification.value
-            },
-            application_id=app.id
-        )
-
-        self.notify_top_candidates(db, app.tenant_id, app.vacancy_id)
-
-        return [{
-            "text": (
-                f"Tu postulación quedó registrada.\n"
-                f"score_rules={score_rules}\n"
-                f"score_cv={score_cv}\n"
-                f"score_total={total}\n"
-                f"estado={classification.value}"
-            )
-        }]
-
-    except Exception as e:
-
-        log_event(
-            db=db,
-            level="ERROR",
-            source="scoring",
-            event="SCORING_EXCEPTION",
-            message=str(e),
-            exc=e,
+            event="SCORING_START",
+            message="Starting scoring process",
             application_id=app.id,
             conversation_session_id=session.id
         )
 
-        raise
+        try:
+            vacancy = db.execute(
+                select(Vacancy).where(Vacancy.id == app.vacancy_id)
+            ).scalar_one()
+
+            answers = db.execute(
+                select(Answer).where(Answer.application_id == app.id)
+            ).scalars().all()
+
+            ai_eval = db.execute(
+                select(AiEvaluation).where(AiEvaluation.application_id == app.id)
+            ).scalar_one_or_none()
+
+            # =========================
+            # VALIDACIÓN RESPUESTAS
+            # =========================
+            required_ids = db.execute(
+                select(VacancyQuestion.id).where(
+                    VacancyQuestion.vacancy_id == app.vacancy_id,
+                    VacancyQuestion.required.is_(True)
+                )
+            ).scalars().all()
+
+            answered_ids = db.execute(
+                select(Answer.vacancy_question_id).where(
+                    Answer.application_id == app.id
+                )
+            ).scalars().all()
+
+            missing = set(required_ids) - set(answered_ids)
+
+            log_event(
+                db=db,
+                level="INFO",
+                source="scoring",
+                event="ANSWER_VALIDATION",
+                payload={
+                    "required": len(required_ids),
+                    "answered": len(answered_ids),
+                    "missing": list(map(str, missing))
+                },
+                application_id=app.id
+            )
+
+            if missing:
+                app.status = ApplicationStatus.IN_PROGRESS
+
+                return [{
+                    "text": "Aún faltan respuestas para completar la postulación."
+                }]
+
+            # =========================
+            # VALIDACIÓN AI
+            # =========================
+            if not ai_eval:
+                log_event(
+                    db=db,
+                    level="WARNING",
+                    source="scoring",
+                    event="AI_EVAL_MISSING",
+                    message="AI evaluation not found",
+                    application_id=app.id
+                )
+
+                app.status = ApplicationStatus.SCORING
+
+                return [{
+                    "text": "Procesando tu CV..."
+                }]
+
+            if ai_eval.status == "pending":
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="scoring",
+                    event="AI_PENDING",
+                    message="AI evaluation still pending",
+                    application_id=app.id
+                )
+
+                app.status = ApplicationStatus.SCORING
+
+                return [{
+                    "text": "Estoy analizando tu CV..."
+                }]
+
+            if ai_eval.status == "failed":
+                log_event(
+                    db=db,
+                    level="ERROR",
+                    source="scoring",
+                    event="AI_FAILED",
+                    message="AI evaluation failed",
+                    application_id=app.id
+                )
+
+                return self.escalate_human(
+                    db,
+                    None,
+                    session,
+                    "Falló la evaluación IA del CV"
+                )
+
+            # =========================
+            # MAPEO RESPUESTAS
+            # =========================
+            answer_map = {}
+
+            for a in answers:
+                if a.answer_boolean is not None:
+                    answer_map[a.field_key] = a.answer_boolean
+                elif a.answer_number is not None:
+                    answer_map[a.field_key] = a.answer_number
+                else:
+                    answer_map[a.field_key] = a.answer_text or ""
+
+            candidate = db.execute(
+                select(Candidate).where(Candidate.id == app.candidate_id)
+            ).scalar_one()
+
+            rules = db.execute(
+                select(ScoringRule)
+                .where(
+                    ScoringRule.vacancy_id == app.vacancy_id,
+                    ScoringRule.is_active.is_(True)
+                )
+                .order_by(ScoringRule.priority.asc())
+            ).scalars().all()
+
+            score_rules = Decimal("0")
+            is_disqualified = False
+            disqualification_reason = None
+
+            # =========================
+            # EVALUACIÓN REGLAS
+            # =========================
+            for rule in rules:
+
+                if rule.source_scope == SourceScope.ANSWER:
+                    current = answer_map.get(rule.field_key)
+
+                elif rule.source_scope == SourceScope.CANDIDATE:
+                    current = getattr(candidate, rule.field_key, None)
+
+                else:
+                    current = (ai_eval.parsed_json or {}).get(rule.field_key)
+
+                matched = self.compare_rule(current, rule)
+
+                log_event(
+                    db=db,
+                    level="DEBUG",
+                    source="scoring",
+                    event="RULE_EVALUATION",
+                    payload={
+                        "rule": rule.name,
+                        "field": rule.field_key,
+                        "value": str(current),
+                        "matched": matched
+                    },
+                    application_id=app.id
+                )
+
+                if matched and rule.is_disqualifier:
+                    is_disqualified = True
+                    disqualification_reason = rule.name
+                    break
+
+                if matched:
+                    score_rules += Decimal(rule.points)
+
+            # =========================
+            # SCORE FINAL
+            # =========================
+            score_cv = Decimal(str(ai_eval.cv_score_0_10 or 0))
+
+            classification, total = self.classify_candidate(
+                vacancy,
+                score_rules,
+                score_cv,
+                is_disqualified
+            )
+
+            app.score_rules = score_rules
+            app.score_cv = score_cv
+            app.score_total = total
+            app.classification = classification
+            app.is_disqualified = is_disqualified
+            app.disqualification_reason = disqualification_reason
+
+            if classification == Classification.SHORTLIST:
+                app.status = ApplicationStatus.SHORTLIST
+            elif classification == Classification.INTERVIEW:
+                app.status = ApplicationStatus.INTERVIEW
+            elif classification == Classification.REVIEW:
+                app.status = ApplicationStatus.REVIEW
+            else:
+                app.status = ApplicationStatus.REJECTED
+
+            # =========================
+            # TRANSICIÓN FINAL
+            # =========================
+            self.transition(session, ChatState.CONFIRM_AND_CLOSE)
+
+            log_event(
+                db=db,
+                level="INFO",
+                source="scoring",
+                event="SCORING_COMPLETE",
+                payload={
+                    "score_rules": float(score_rules),
+                    "score_cv": float(score_cv),
+                    "score_total": float(total),
+                    "classification": classification.value
+                },
+                application_id=app.id
+            )
+
+            self.notify_top_candidates(db, app.tenant_id, app.vacancy_id)
+
+            return [{
+                "text": (
+                    f"Tu postulación quedó registrada.\n"
+                    f"score_rules={score_rules}\n"
+                    f"score_cv={score_cv}\n"
+                    f"score_total={total}\n"
+                    f"estado={classification.value}"
+                )
+            }]
+
+        except Exception as e:
+
+            log_event(
+                db=db,
+                level="ERROR",
+                source="scoring",
+                event="SCORING_EXCEPTION",
+                message=str(e),
+                exc=e,
+                application_id=app.id,
+                conversation_session_id=session.id
+            )
+
+            raise
 
     def notify_top_candidates(self, db, tenant_id, vacancy_id):
         rows = db.execute(
@@ -717,273 +717,273 @@ def apply_scoring(self, db, app: Application, session: ConversationSession):
             return [{"text": "He detectado varios errores consecutivos. Te derivo con RRHH."}]
         return [{"text": message}]
 
-def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
+    def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
 
-    with SessionLocal() as db:
-
-        log_event(
-            db=db,
-            level="INFO",
-            source="cv_pipeline",
-            event="PIPELINE_START",
-            message="Starting CV pipeline async",
-            tenant_id=tenant_id,
-            application_id=application_id
-        )
-
-        try:
-            # =========================
-            # LOAD ENTITIES
-            # =========================
-            tenant = db.execute(
-                select(Tenant).where(Tenant.id == tenant_id)
-            ).scalar_one()
-
-            app = db.execute(
-                select(Application).where(Application.id == application_id)
-            ).scalar_one()
-
-            vacancy = db.execute(
-                select(Vacancy).where(Vacancy.id == app.vacancy_id)
-            ).scalar_one()
-
-            cv = db.execute(
-                select(CvDocument).where(CvDocument.id == cv_document_id)
-            ).scalar_one()
-
-            session = db.execute(
-                select(ConversationSession).where(
-                    ConversationSession.application_id == app.id,
-                    ConversationSession.is_active.is_(True)
-                )
-            ).scalar_one()
+        with SessionLocal() as db:
 
             log_event(
                 db=db,
                 level="INFO",
                 source="cv_pipeline",
-                event="ENTITIES_LOADED",
-                application_id=app.id,
-                payload={
-                    "vacancy_id": str(vacancy.id),
-                    "cv_id": str(cv.id),
-                    "session_id": str(session.id)
-                }
-            )
-
-            # =========================
-            # LOAD FILE CONTENT
-            # =========================
-            content = cv.content
-
-            if content is None:
-                log_event(
-                    db=db,
-                    level="INFO",
-                    source="cv_pipeline",
-                    event="LOAD_FILE_FROM_STORAGE",
-                    message="Loading CV from storage_key",
-                    application_id=app.id
-                )
-
-                with open(cv.storage_key, "rb") as fh:
-                    content = fh.read()
-
-            # =========================
-            # TEXT EXTRACTION
-            # =========================
-            text, parse_status = extract_cv_text(cv.extension, content)
-
-            cv.extracted_text = text
-            cv.parse_status = parse_status
-
-            log_event(
-                db=db,
-                level="INFO",
-                source="cv_pipeline",
-                event="CV_TEXT_EXTRACTED",
-                application_id=app.id,
-                payload={
-                    "parse_status": str(parse_status),
-                    "text_length": len(text or "")
-                }
-            )
-
-            # =========================
-            # AI EVALUATION OBJECT
-            # =========================
-            ai_eval = db.execute(
-                select(AiEvaluation).where(AiEvaluation.cv_document_id == cv.id)
-            ).scalar_one_or_none()
-
-            if not ai_eval:
-                ai_eval = AiEvaluation(
-                    tenant_id=tenant.id,
-                    application_id=app.id,
-                    cv_document_id=cv.id,
-                    status="pending",
-                )
-                db.add(ai_eval)
-                db.flush()
-
-                log_event(
-                    db=db,
-                    level="INFO",
-                    source="cv_pipeline",
-                    event="AI_EVAL_CREATED",
-                    application_id=app.id
-                )
-
-            # =========================
-            # CALL LLM
-            # =========================
-            try:
-                log_event(
-                    db=db,
-                    level="INFO",
-                    source="cv_pipeline",
-                    event="LLM_CALL_START",
-                    application_id=app.id
-                )
-
-                payload, raw, latency_ms = self.llm.evaluate_cv(
-                    {
-                        "title": vacancy.title,
-                        "description": vacancy.description,
-                        "mandatory_requirements": vacancy.mandatory_requirements,
-                        "desirable_requirements": vacancy.desirable_requirements,
-                        "location_text": vacancy.location_text,
-                        "schedule_text": vacancy.schedule_text,
-                    },
-                    text,
-                )
-
-                ai_eval.raw_response = raw
-                ai_eval.parsed_json = payload.model_dump()
-                ai_eval.candidate_profile = payload.candidate_profile
-                ai_eval.experience_summary = payload.experience_summary
-                ai_eval.skills = payload.skills
-                ai_eval.red_flags = payload.red_flags
-                ai_eval.cv_score_0_10 = Decimal(str(payload.cv_score_0_10))
-                ai_eval.recommendation = payload.recommendation
-                ai_eval.status = AiEvalStatus.SUCCESS
-                ai_eval.attempts += 1
-
-                app.status = ApplicationStatus.SCORING
-
-                log_event(
-                    db=db,
-                    level="INFO",
-                    source="cv_pipeline",
-                    event="LLM_CALL_SUCCESS",
-                    application_id=app.id,
-                    payload={
-                        "score": float(payload.cv_score_0_10),
-                        "latency_ms": latency_ms
-                    }
-                )
-
-            except Exception as exc:
-
-                ai_eval.status = AiEvalStatus.FAILED
-                ai_eval.error_message = str(exc)
-                ai_eval.attempts += 1
-
-                log_event(
-                    db=db,
-                    level="ERROR",
-                    source="cv_pipeline",
-                    event="LLM_CALL_FAILED",
-                    message=str(exc),
-                    exc=exc,
-                    application_id=app.id
-                )
-
-            # =========================
-            # TRIGGER SCORING
-            # =========================
-            log_event(
-                db=db,
-                level="INFO",
-                source="cv_pipeline",
-                event="CHECK_SCORING_TRIGGER",
-                application_id=app.id,
-                payload={
-                    "session_state": session.current_state
-                }
-            )
-
-            if session.current_state == ChatState.SCORING:
-
-                log_event(
-                    db=db,
-                    level="INFO",
-                    source="cv_pipeline",
-                    event="TRIGGER_SCORING",
-                    application_id=app.id
-                )
-
-                outgoing = self.apply_scoring(db, app, session)
-
-                db.commit()
-
-                gateway = TelegramGateway(tenant.telegram_bot_token)
-
-                for msg in outgoing:
-                    try:
-                        gateway.send_message(
-                            session.platform_chat_id,
-                            msg["text"],
-                            msg.get("reply_markup")
-                        )
-
-                        log_event(
-                            db=db,
-                            level="INFO",
-                            source="cv_pipeline",
-                            event="MESSAGE_SENT",
-                            application_id=app.id,
-                            payload={"text": msg["text"][:100]}
-                        )
-
-                    except Exception as send_exc:
-                        log_event(
-                            db=db,
-                            level="ERROR",
-                            source="cv_pipeline",
-                            event="MESSAGE_SEND_FAILED",
-                            message=str(send_exc),
-                            exc=send_exc,
-                            application_id=app.id
-                        )
-
-                return
-
-            # =========================
-            # FINAL COMMIT
-            # =========================
-            db.commit()
-
-            log_event(
-                db=db,
-                level="INFO",
-                source="cv_pipeline",
-                event="PIPELINE_END",
-                application_id=app.id
-            )
-
-        except Exception as e:
-
-            log_event(
-                db=db,
-                level="CRITICAL",
-                source="cv_pipeline",
-                event="PIPELINE_CRASH",
-                message=str(e),
-                exc=e,
+                event="PIPELINE_START",
+                message="Starting CV pipeline async",
                 tenant_id=tenant_id,
                 application_id=application_id
             )
 
-            db.rollback()
-            raise
+            try:
+                # =========================
+                # LOAD ENTITIES
+                # =========================
+                tenant = db.execute(
+                    select(Tenant).where(Tenant.id == tenant_id)
+                ).scalar_one()
+
+                app = db.execute(
+                    select(Application).where(Application.id == application_id)
+                ).scalar_one()
+
+                vacancy = db.execute(
+                    select(Vacancy).where(Vacancy.id == app.vacancy_id)
+                ).scalar_one()
+
+                cv = db.execute(
+                    select(CvDocument).where(CvDocument.id == cv_document_id)
+                ).scalar_one()
+
+                session = db.execute(
+                    select(ConversationSession).where(
+                        ConversationSession.application_id == app.id,
+                        ConversationSession.is_active.is_(True)
+                    )
+                ).scalar_one()
+
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="ENTITIES_LOADED",
+                    application_id=app.id,
+                    payload={
+                        "vacancy_id": str(vacancy.id),
+                        "cv_id": str(cv.id),
+                        "session_id": str(session.id)
+                    }
+                )
+
+                # =========================
+                # LOAD FILE CONTENT
+                # =========================
+                content = cv.content
+
+                if content is None:
+                    log_event(
+                        db=db,
+                        level="INFO",
+                        source="cv_pipeline",
+                        event="LOAD_FILE_FROM_STORAGE",
+                        message="Loading CV from storage_key",
+                        application_id=app.id
+                    )
+
+                    with open(cv.storage_key, "rb") as fh:
+                        content = fh.read()
+
+                # =========================
+                # TEXT EXTRACTION
+                # =========================
+                text, parse_status = extract_cv_text(cv.extension, content)
+
+                cv.extracted_text = text
+                cv.parse_status = parse_status
+
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="CV_TEXT_EXTRACTED",
+                    application_id=app.id,
+                    payload={
+                        "parse_status": str(parse_status),
+                        "text_length": len(text or "")
+                    }
+                )
+
+                # =========================
+                # AI EVALUATION OBJECT
+                # =========================
+                ai_eval = db.execute(
+                    select(AiEvaluation).where(AiEvaluation.cv_document_id == cv.id)
+                ).scalar_one_or_none()
+
+                if not ai_eval:
+                    ai_eval = AiEvaluation(
+                        tenant_id=tenant.id,
+                        application_id=app.id,
+                        cv_document_id=cv.id,
+                        status="pending",
+                    )
+                    db.add(ai_eval)
+                    db.flush()
+
+                    log_event(
+                        db=db,
+                        level="INFO",
+                        source="cv_pipeline",
+                        event="AI_EVAL_CREATED",
+                        application_id=app.id
+                    )
+
+                # =========================
+                # CALL LLM
+                # =========================
+                try:
+                    log_event(
+                        db=db,
+                        level="INFO",
+                        source="cv_pipeline",
+                        event="LLM_CALL_START",
+                        application_id=app.id
+                    )
+
+                    payload, raw, latency_ms = self.llm.evaluate_cv(
+                        {
+                            "title": vacancy.title,
+                            "description": vacancy.description,
+                            "mandatory_requirements": vacancy.mandatory_requirements,
+                            "desirable_requirements": vacancy.desirable_requirements,
+                            "location_text": vacancy.location_text,
+                            "schedule_text": vacancy.schedule_text,
+                        },
+                        text,
+                    )
+
+                    ai_eval.raw_response = raw
+                    ai_eval.parsed_json = payload.model_dump()
+                    ai_eval.candidate_profile = payload.candidate_profile
+                    ai_eval.experience_summary = payload.experience_summary
+                    ai_eval.skills = payload.skills
+                    ai_eval.red_flags = payload.red_flags
+                    ai_eval.cv_score_0_10 = Decimal(str(payload.cv_score_0_10))
+                    ai_eval.recommendation = payload.recommendation
+                    ai_eval.status = AiEvalStatus.SUCCESS
+                    ai_eval.attempts += 1
+
+                    app.status = ApplicationStatus.SCORING
+
+                    log_event(
+                        db=db,
+                        level="INFO",
+                        source="cv_pipeline",
+                        event="LLM_CALL_SUCCESS",
+                        application_id=app.id,
+                        payload={
+                            "score": float(payload.cv_score_0_10),
+                            "latency_ms": latency_ms
+                        }
+                    )
+
+                except Exception as exc:
+
+                    ai_eval.status = AiEvalStatus.FAILED
+                    ai_eval.error_message = str(exc)
+                    ai_eval.attempts += 1
+
+                    log_event(
+                        db=db,
+                        level="ERROR",
+                        source="cv_pipeline",
+                        event="LLM_CALL_FAILED",
+                        message=str(exc),
+                        exc=exc,
+                        application_id=app.id
+                    )
+
+                # =========================
+                # TRIGGER SCORING
+                # =========================
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="CHECK_SCORING_TRIGGER",
+                    application_id=app.id,
+                    payload={
+                        "session_state": session.current_state
+                    }
+                )
+
+                if session.current_state == ChatState.SCORING:
+
+                    log_event(
+                        db=db,
+                        level="INFO",
+                        source="cv_pipeline",
+                        event="TRIGGER_SCORING",
+                        application_id=app.id
+                    )
+
+                    outgoing = self.apply_scoring(db, app, session)
+
+                    db.commit()
+
+                    gateway = TelegramGateway(tenant.telegram_bot_token)
+
+                    for msg in outgoing:
+                        try:
+                            gateway.send_message(
+                                session.platform_chat_id,
+                                msg["text"],
+                                msg.get("reply_markup")
+                            )
+
+                            log_event(
+                                db=db,
+                                level="INFO",
+                                source="cv_pipeline",
+                                event="MESSAGE_SENT",
+                                application_id=app.id,
+                                payload={"text": msg["text"][:100]}
+                            )
+
+                        except Exception as send_exc:
+                            log_event(
+                                db=db,
+                                level="ERROR",
+                                source="cv_pipeline",
+                                event="MESSAGE_SEND_FAILED",
+                                message=str(send_exc),
+                                exc=send_exc,
+                                application_id=app.id
+                            )
+
+                    return
+
+                # =========================
+                # FINAL COMMIT
+                # =========================
+                db.commit()
+
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="PIPELINE_END",
+                    application_id=app.id
+                )
+
+            except Exception as e:
+
+                log_event(
+                    db=db,
+                    level="CRITICAL",
+                    source="cv_pipeline",
+                    event="PIPELINE_CRASH",
+                    message=str(e),
+                    exc=e,
+                    tenant_id=tenant_id,
+                    application_id=application_id
+                )
+
+                db.rollback()
+                raise
