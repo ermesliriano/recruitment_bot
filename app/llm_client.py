@@ -58,16 +58,7 @@ class LlmClient:
         self.client = httpx.Client(timeout=120)
 
     def evaluate_cv(self, vacancy: dict[str, Any], cv_text: str) -> tuple[LlmEvaluationPayload, str, int]:
-    
-        log_event(
-            db,
-            level="INFO",
-            source="llm",
-            event="REQUEST",
-            payload={"text_length": len(text)},
-            application_id=app.id,
-        )
-        
+
         prompt = PROMPT_TEMPLATE.format(
             title=vacancy["title"],
             description=vacancy["description"],

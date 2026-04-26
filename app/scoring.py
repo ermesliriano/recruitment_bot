@@ -189,6 +189,7 @@ class RecruitmentService:
         return [{"text": "Estado no soportado. Te derivo con RRHH."}]
 
     def start_conversation(self, db, tenant, session, event):
+        raw_phone = event.contact_phone
         
         log_event(
             db,
@@ -198,8 +199,7 @@ class RecruitmentService:
             payload={"phone": raw_phone},
             tenant_id=tenant.id,
         )
-    
-        raw_phone = event.contact_phone
+        
         if raw_phone:
             phone = normalize_phone(raw_phone)
             candidate = db.execute(
@@ -323,7 +323,8 @@ class RecruitmentService:
         return self.process_cv(db, tenant, session, event, background_tasks)
 
     def process_cv(self, db, tenant, session, event, background_tasks):
-    
+        app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
+        
         log_event(
             db,
             level="INFO",
@@ -335,9 +336,8 @@ class RecruitmentService:
                 "mime": mime_type,
             },
             application_id=app.id,
-        )    
+        )
         
-        app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
         gateway = TelegramGateway(tenant.telegram_bot_token)
         file_bytes, file_meta = gateway.get_file_bytes(event.document["file_id"])
 
@@ -397,7 +397,9 @@ class RecruitmentService:
         return [{"text": prompt}]
 
     def ask_questions(self, db, tenant, session, event):
-    
+
+        app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
+        
         log_event(
             db,
             level="INFO",
@@ -407,7 +409,6 @@ class RecruitmentService:
             application_id=app.id,
         )
         
-        app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
         questions = self._get_ordered_questions(db, app.vacancy_id)
         idx = int(session.state_payload.get("question_index", 0))
         if idx >= len(questions):
