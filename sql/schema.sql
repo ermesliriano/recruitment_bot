@@ -274,3 +274,26 @@ SELECT
 FROM applications a
 JOIN candidates c ON c.id = a.candidate_id
 JOIN vacancies v ON v.id = a.vacancy_id;
+
+CREATE TABLE system_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  tenant_id UUID NULL,
+
+  level TEXT NOT NULL,                 -- INFO | WARNING | ERROR
+  source TEXT NOT NULL,                -- módulo: api_webhooks, scoring, llm, etc
+  event TEXT NOT NULL,                 -- nombre corto del evento
+
+  message TEXT NULL,                   -- mensaje humano
+  payload JSONB NULL,                  -- datos relevantes (input/output)
+  traceback TEXT NULL,                 -- stacktrace completo
+
+  application_id UUID NULL,
+  conversation_session_id UUID NULL,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_logs_created_at ON system_logs (created_at DESC);
+CREATE INDEX idx_logs_tenant ON system_logs (tenant_id);
+CREATE INDEX idx_logs_level ON system_logs (level);

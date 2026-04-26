@@ -93,6 +93,7 @@ class RecruitmentService:
         self.llm = LlmClient()
 
     def transition(self, session: ConversationSession, next_state: ChatState) -> None:
+        db = SessionLocal()
     
         log_event(
             db,
