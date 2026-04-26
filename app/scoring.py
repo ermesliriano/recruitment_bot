@@ -419,7 +419,22 @@ class RecruitmentService:
         required_total = db.execute(
             select(VacancyQuestion).where(VacancyQuestion.vacancy_id == app.vacancy_id, VacancyQuestion.required.is_(True))
         ).scalars().all()
-        if len(answers) < len(required_total):
+        required_ids = db.execute(
+            select(VacancyQuestion.id)
+            .where(
+                VacancyQuestion.vacancy_id == app.vacancy_id,
+                VacancyQuestion.required.is_(True)
+            )
+        ).scalars().all()
+
+        answered_ids = db.execute(
+            select(Answer.vacancy_question_id)
+            .where(Answer.application_id == app.id)
+        ).scalars().all()
+
+        missing = set(required_ids) - set(answered_ids)
+
+        if missing:
             app.status = ApplicationStatus.IN_PROGRESS
             return [{"text": "Aún faltan respuestas para completar la postulación."}]
 
