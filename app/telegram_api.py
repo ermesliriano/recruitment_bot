@@ -88,7 +88,6 @@ class TelegramGateway:
 
     def send_message(self, chat_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
-            db = SessionLocal()
             log_event(
                 db,
                 level="INFO",
@@ -107,7 +106,6 @@ class TelegramGateway:
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
-            db = SessionLocal()
             log_event(
                 db,
                 level="ERROR",

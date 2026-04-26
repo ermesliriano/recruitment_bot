@@ -1,9 +1,10 @@
 import traceback
 from sqlalchemy import insert
 from app.models import SystemLog  # crea modelo
+from app.core import SessionLocal
 
 def log_event(
-    db,
+    db = SessionLocal(),
     *,
     level: str,
     source: str,

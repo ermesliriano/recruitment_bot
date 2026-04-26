@@ -98,7 +98,6 @@ class LlmClient:
                 validated = LlmEvaluationPayload.model_validate(obj)
                 return validated, raw, latency_ms
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-                db = SessionLocal()
                 log_event(
                     db,
                     level="ERROR",

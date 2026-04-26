@@ -256,16 +256,6 @@ class RecruitmentService:
 
     def select_vacancy(self, db, tenant, session, event):
     
-        log_event(
-            db,
-            level="INFO",
-            source="application",
-            event="VACANCY_SELECTED",
-            payload={"vacancy_id": vacancy_id},
-            tenant_id=tenant.id,
-            conversation_session_id=session.id,
-        )
-    
         if not event.callback_data or not event.callback_data.startswith("vac:"):
             return self._invalid(session, "Debes seleccionar una vacante usando los botones.")
 
@@ -275,6 +265,16 @@ class RecruitmentService:
         ).scalar_one_or_none()
         if not vacancy:
             return self._invalid(session, "La vacante ya no está disponible.")
+            
+        log_event(
+            db,
+            level="INFO",
+            source="application",
+            event="VACANCY_SELECTED",
+            payload={"vacancy_id": vacancy_id},
+            tenant_id=tenant.id,
+            conversation_session_id=session.id,
+        )
 
         application = self.create_application(db, tenant.id, session.candidate_id, vacancy.id)
         session.application_id = application.id
