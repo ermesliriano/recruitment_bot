@@ -717,29 +717,105 @@ def apply_scoring(self, db, app: Application, session: ConversationSession):
             return [{"text": "He detectado varios errores consecutivos. Te derivo con RRHH."}]
         return [{"text": message}]
 
-    def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
-        with SessionLocal() as db:
-            tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one()
-            app = db.execute(select(Application).where(Application.id == application_id)).scalar_one()
-            vacancy = db.execute(select(Vacancy).where(Vacancy.id == app.vacancy_id)).scalar_one()
-            cv = db.execute(select(CvDocument).where(CvDocument.id == cv_document_id)).scalar_one()
-            session = db.execute(
-                select(ConversationSession)
-                .where(ConversationSession.application_id == app.id, ConversationSession.is_active.is_(True))
+def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
+
+    with SessionLocal() as db:
+
+        log_event(
+            db=db,
+            level="INFO",
+            source="cv_pipeline",
+            event="PIPELINE_START",
+            message="Starting CV pipeline async",
+            tenant_id=tenant_id,
+            application_id=application_id
+        )
+
+        try:
+            # =========================
+            # LOAD ENTITIES
+            # =========================
+            tenant = db.execute(
+                select(Tenant).where(Tenant.id == tenant_id)
             ).scalar_one()
 
+            app = db.execute(
+                select(Application).where(Application.id == application_id)
+            ).scalar_one()
+
+            vacancy = db.execute(
+                select(Vacancy).where(Vacancy.id == app.vacancy_id)
+            ).scalar_one()
+
+            cv = db.execute(
+                select(CvDocument).where(CvDocument.id == cv_document_id)
+            ).scalar_one()
+
+            session = db.execute(
+                select(ConversationSession).where(
+                    ConversationSession.application_id == app.id,
+                    ConversationSession.is_active.is_(True)
+                )
+            ).scalar_one()
+
+            log_event(
+                db=db,
+                level="INFO",
+                source="cv_pipeline",
+                event="ENTITIES_LOADED",
+                application_id=app.id,
+                payload={
+                    "vacancy_id": str(vacancy.id),
+                    "cv_id": str(cv.id),
+                    "session_id": str(session.id)
+                }
+            )
+
+            # =========================
+            # LOAD FILE CONTENT
+            # =========================
             content = cv.content
+
             if content is None:
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="LOAD_FILE_FROM_STORAGE",
+                    message="Loading CV from storage_key",
+                    application_id=app.id
+                )
+
                 with open(cv.storage_key, "rb") as fh:
                     content = fh.read()
 
+            # =========================
+            # TEXT EXTRACTION
+            # =========================
             text, parse_status = extract_cv_text(cv.extension, content)
+
             cv.extracted_text = text
             cv.parse_status = parse_status
 
+            log_event(
+                db=db,
+                level="INFO",
+                source="cv_pipeline",
+                event="CV_TEXT_EXTRACTED",
+                application_id=app.id,
+                payload={
+                    "parse_status": str(parse_status),
+                    "text_length": len(text or "")
+                }
+            )
+
+            # =========================
+            # AI EVALUATION OBJECT
+            # =========================
             ai_eval = db.execute(
                 select(AiEvaluation).where(AiEvaluation.cv_document_id == cv.id)
             ).scalar_one_or_none()
+
             if not ai_eval:
                 ai_eval = AiEvaluation(
                     tenant_id=tenant.id,
@@ -750,7 +826,26 @@ def apply_scoring(self, db, app: Application, session: ConversationSession):
                 db.add(ai_eval)
                 db.flush()
 
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="AI_EVAL_CREATED",
+                    application_id=app.id
+                )
+
+            # =========================
+            # CALL LLM
+            # =========================
             try:
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="LLM_CALL_START",
+                    application_id=app.id
+                )
+
                 payload, raw, latency_ms = self.llm.evaluate_cv(
                     {
                         "title": vacancy.title,
@@ -762,6 +857,7 @@ def apply_scoring(self, db, app: Application, session: ConversationSession):
                     },
                     text,
                 )
+
                 ai_eval.raw_response = raw
                 ai_eval.parsed_json = payload.model_dump()
                 ai_eval.candidate_profile = payload.candidate_profile
@@ -772,19 +868,122 @@ def apply_scoring(self, db, app: Application, session: ConversationSession):
                 ai_eval.recommendation = payload.recommendation
                 ai_eval.status = AiEvalStatus.SUCCESS
                 ai_eval.attempts += 1
+
                 app.status = ApplicationStatus.SCORING
-                
+
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="LLM_CALL_SUCCESS",
+                    application_id=app.id,
+                    payload={
+                        "score": float(payload.cv_score_0_10),
+                        "latency_ms": latency_ms
+                    }
+                )
+
             except Exception as exc:
+
                 ai_eval.status = AiEvalStatus.FAILED
                 ai_eval.error_message = str(exc)
                 ai_eval.attempts += 1
 
+                log_event(
+                    db=db,
+                    level="ERROR",
+                    source="cv_pipeline",
+                    event="LLM_CALL_FAILED",
+                    message=str(exc),
+                    exc=exc,
+                    application_id=app.id
+                )
+
+            # =========================
+            # TRIGGER SCORING
+            # =========================
+            log_event(
+                db=db,
+                level="INFO",
+                source="cv_pipeline",
+                event="CHECK_SCORING_TRIGGER",
+                application_id=app.id,
+                payload={
+                    "session_state": session.current_state
+                }
+            )
+
             if session.current_state == ChatState.SCORING:
+
+                log_event(
+                    db=db,
+                    level="INFO",
+                    source="cv_pipeline",
+                    event="TRIGGER_SCORING",
+                    application_id=app.id
+                )
+
                 outgoing = self.apply_scoring(db, app, session)
+
                 db.commit()
+
                 gateway = TelegramGateway(tenant.telegram_bot_token)
+
                 for msg in outgoing:
-                    gateway.send_message(session.platform_chat_id, msg["text"], msg.get("reply_markup"))
+                    try:
+                        gateway.send_message(
+                            session.platform_chat_id,
+                            msg["text"],
+                            msg.get("reply_markup")
+                        )
+
+                        log_event(
+                            db=db,
+                            level="INFO",
+                            source="cv_pipeline",
+                            event="MESSAGE_SENT",
+                            application_id=app.id,
+                            payload={"text": msg["text"][:100]}
+                        )
+
+                    except Exception as send_exc:
+                        log_event(
+                            db=db,
+                            level="ERROR",
+                            source="cv_pipeline",
+                            event="MESSAGE_SEND_FAILED",
+                            message=str(send_exc),
+                            exc=send_exc,
+                            application_id=app.id
+                        )
+
                 return
 
+            # =========================
+            # FINAL COMMIT
+            # =========================
             db.commit()
+
+            log_event(
+                db=db,
+                level="INFO",
+                source="cv_pipeline",
+                event="PIPELINE_END",
+                application_id=app.id
+            )
+
+        except Exception as e:
+
+            log_event(
+                db=db,
+                level="CRITICAL",
+                source="cv_pipeline",
+                event="PIPELINE_CRASH",
+                message=str(e),
+                exc=e,
+                tenant_id=tenant_id,
+                application_id=application_id
+            )
+
+            db.rollback()
+            raise
