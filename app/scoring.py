@@ -411,41 +411,126 @@ class RecruitmentService:
             return Classification.REVIEW, total
         return Classification.REJECT, total
 
-    def apply_scoring(self, db, app: Application, session: ConversationSession):
-        vacancy = db.execute(select(Vacancy).where(Vacancy.id == app.vacancy_id)).scalar_one()
-        answers = db.execute(select(Answer).where(Answer.application_id == app.id)).scalars().all()
-        ai_eval = db.execute(select(AiEvaluation).where(AiEvaluation.application_id == app.id)).scalar_one_or_none()
+def apply_scoring(self, db, app: Application, session: ConversationSession):
 
-        required_total = db.execute(
-            select(VacancyQuestion).where(VacancyQuestion.vacancy_id == app.vacancy_id, VacancyQuestion.required.is_(True))
+    log_event(
+        db=db,
+        level="INFO",
+        source="scoring",
+        event="SCORING_START",
+        message="Starting scoring process",
+        application_id=app.id,
+        conversation_session_id=session.id
+    )
+
+    try:
+        vacancy = db.execute(
+            select(Vacancy).where(Vacancy.id == app.vacancy_id)
+        ).scalar_one()
+
+        answers = db.execute(
+            select(Answer).where(Answer.application_id == app.id)
         ).scalars().all()
+
+        ai_eval = db.execute(
+            select(AiEvaluation).where(AiEvaluation.application_id == app.id)
+        ).scalar_one_or_none()
+
+        # =========================
+        # VALIDACIÓN RESPUESTAS
+        # =========================
         required_ids = db.execute(
-            select(VacancyQuestion.id)
-            .where(
+            select(VacancyQuestion.id).where(
                 VacancyQuestion.vacancy_id == app.vacancy_id,
                 VacancyQuestion.required.is_(True)
             )
         ).scalars().all()
 
         answered_ids = db.execute(
-            select(Answer.vacancy_question_id)
-            .where(Answer.application_id == app.id)
+            select(Answer.vacancy_question_id).where(
+                Answer.application_id == app.id
+            )
         ).scalars().all()
 
         missing = set(required_ids) - set(answered_ids)
 
+        log_event(
+            db=db,
+            level="INFO",
+            source="scoring",
+            event="ANSWER_VALIDATION",
+            payload={
+                "required": len(required_ids),
+                "answered": len(answered_ids),
+                "missing": list(map(str, missing))
+            },
+            application_id=app.id
+        )
+
         if missing:
             app.status = ApplicationStatus.IN_PROGRESS
-            return [{"text": "Aún faltan respuestas para completar la postulación."}]
 
-        if not ai_eval or ai_eval.status == "pending":
+            return [{
+                "text": "Aún faltan respuestas para completar la postulación."
+            }]
+
+        # =========================
+        # VALIDACIÓN AI
+        # =========================
+        if not ai_eval:
+            log_event(
+                db=db,
+                level="WARNING",
+                source="scoring",
+                event="AI_EVAL_MISSING",
+                message="AI evaluation not found",
+                application_id=app.id
+            )
+
             app.status = ApplicationStatus.SCORING
-            return [{"text": "Gracias. Estoy analizando tu CV y calculando tu score final."}]
+
+            return [{
+                "text": "Procesando tu CV..."
+            }]
+
+        if ai_eval.status == "pending":
+            log_event(
+                db=db,
+                level="INFO",
+                source="scoring",
+                event="AI_PENDING",
+                message="AI evaluation still pending",
+                application_id=app.id
+            )
+
+            app.status = ApplicationStatus.SCORING
+
+            return [{
+                "text": "Estoy analizando tu CV..."
+            }]
 
         if ai_eval.status == "failed":
-            return self.escalate_human(db, None, session, "Falló la evaluación IA del CV")
+            log_event(
+                db=db,
+                level="ERROR",
+                source="scoring",
+                event="AI_FAILED",
+                message="AI evaluation failed",
+                application_id=app.id
+            )
 
+            return self.escalate_human(
+                db,
+                None,
+                session,
+                "Falló la evaluación IA del CV"
+            )
+
+        # =========================
+        # MAPEO RESPUESTAS
+        # =========================
         answer_map = {}
+
         for a in answers:
             if a.answer_boolean is not None:
                 answer_map[a.field_key] = a.answer_boolean
@@ -454,10 +539,16 @@ class RecruitmentService:
             else:
                 answer_map[a.field_key] = a.answer_text or ""
 
-        candidate = db.execute(select(Candidate).where(Candidate.id == app.candidate_id)).scalar_one()
+        candidate = db.execute(
+            select(Candidate).where(Candidate.id == app.candidate_id)
+        ).scalar_one()
+
         rules = db.execute(
             select(ScoringRule)
-            .where(ScoringRule.vacancy_id == app.vacancy_id, ScoringRule.is_active.is_(True))
+            .where(
+                ScoringRule.vacancy_id == app.vacancy_id,
+                ScoringRule.is_active.is_(True)
+            )
             .order_by(ScoringRule.priority.asc())
         ).scalars().all()
 
@@ -465,24 +556,55 @@ class RecruitmentService:
         is_disqualified = False
         disqualification_reason = None
 
+        # =========================
+        # EVALUACIÓN REGLAS
+        # =========================
         for rule in rules:
+
             if rule.source_scope == SourceScope.ANSWER:
                 current = answer_map.get(rule.field_key)
+
             elif rule.source_scope == SourceScope.CANDIDATE:
                 current = getattr(candidate, rule.field_key, None)
+
             else:
                 current = (ai_eval.parsed_json or {}).get(rule.field_key)
 
             matched = self.compare_rule(current, rule)
+
+            log_event(
+                db=db,
+                level="DEBUG",
+                source="scoring",
+                event="RULE_EVALUATION",
+                payload={
+                    "rule": rule.name,
+                    "field": rule.field_key,
+                    "value": str(current),
+                    "matched": matched
+                },
+                application_id=app.id
+            )
+
             if matched and rule.is_disqualifier:
                 is_disqualified = True
                 disqualification_reason = rule.name
                 break
+
             if matched:
                 score_rules += Decimal(rule.points)
 
+        # =========================
+        # SCORE FINAL
+        # =========================
         score_cv = Decimal(str(ai_eval.cv_score_0_10 or 0))
-        classification, total = self.classify_candidate(vacancy, score_rules, score_cv, is_disqualified)
+
+        classification, total = self.classify_candidate(
+            vacancy,
+            score_rules,
+            score_cv,
+            is_disqualified
+        )
 
         app.score_rules = score_rules
         app.score_cv = score_cv
@@ -500,7 +622,25 @@ class RecruitmentService:
         else:
             app.status = ApplicationStatus.REJECTED
 
+        # =========================
+        # TRANSICIÓN FINAL
+        # =========================
         self.transition(session, ChatState.CONFIRM_AND_CLOSE)
+
+        log_event(
+            db=db,
+            level="INFO",
+            source="scoring",
+            event="SCORING_COMPLETE",
+            payload={
+                "score_rules": float(score_rules),
+                "score_cv": float(score_cv),
+                "score_total": float(total),
+                "classification": classification.value
+            },
+            application_id=app.id
+        )
+
         self.notify_top_candidates(db, app.tenant_id, app.vacancy_id)
 
         return [{
@@ -512,6 +652,21 @@ class RecruitmentService:
                 f"estado={classification.value}"
             )
         }]
+
+    except Exception as e:
+
+        log_event(
+            db=db,
+            level="ERROR",
+            source="scoring",
+            event="SCORING_EXCEPTION",
+            message=str(e),
+            exc=e,
+            application_id=app.id,
+            conversation_session_id=session.id
+        )
+
+        raise
 
     def notify_top_candidates(self, db, tenant_id, vacancy_id):
         rows = db.execute(
