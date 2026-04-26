@@ -1,4 +1,6 @@
 -- seeds/mock_data.sql
+ truncate table tenants, vacancies, questions, vacancy_questions, candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, scoring_rules;
+ 
 INSERT INTO tenants (
   id, slug, name, hr_email, telegram_bot_token, telegram_webhook_secret, settings_json
 ) VALUES (
@@ -62,7 +64,7 @@ INSERT INTO scoring_rules (
   expected_text, expected_number, expected_boolean, points, is_disqualifier, priority
 ) VALUES
 ('50000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Sin permiso de trabajo', 'ANSWER', 'work_permit', 'EQUALS', NULL, NULL, false, 0, true, 1),
-('50000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'FastAPI 2+ años', 'ANSWER', 'years_fastapi', 'gte', NULL, 2, NULL, 8, false, 10),
-('50000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'PostgreSQL 2+ años', 'ANSWER', 'years_postgres', 'gte', NULL, 2, NULL, 6, false, 20),
-('50000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Inglés B2', 'ANSWER', 'english_level', 'contains', 'b2', NULL, NULL, 3, false, 30),
+('50000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'FastAPI 2+ años', 'ANSWER', 'years_fastapi', 'GTE', NULL, 2, NULL, 8, false, 10),
+('50000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'PostgreSQL 2+ años', 'ANSWER', 'years_postgres', 'GTE', NULL, 2, NULL, 6, false, 20),
+('50000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Inglés B2', 'ANSWER', 'english_level', 'CONTAINS', 'b2', NULL, NULL, 3, false, 30),
 ('50000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Disponible para guardias', 'ANSWER', 'oncall_available', 'EQUALS', NULL, NULL, true, 2, false, 40);

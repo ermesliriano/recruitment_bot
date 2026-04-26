@@ -92,6 +92,19 @@ class RecruitmentService:
         self.llm = LlmClient()
 
     def transition(self, session: ConversationSession, next_state: ChatState) -> None:
+    
+        log_event(
+            db,
+            level="INFO",
+            source="state_machine",
+            event="STATE_TRANSITION",
+            payload={
+                "from": session.current_state.value,
+                "to": next_state.value,
+            },
+            conversation_session_id=session.id,
+        )
+        
         if next_state not in ALLOWED_TRANSITIONS[session.current_state]:
             raise RuntimeError(f"Transición inválida {session.current_state} -> {next_state}")
         session.current_state = next_state
@@ -124,6 +137,20 @@ class RecruitmentService:
 
     def dispatch(self, db, tenant: Tenant, event: IncomingEvent, background_tasks) -> list[dict[str, Any]]:
         session = self.get_or_create_session(db, tenant.id, event.chat_id, event.user_id)
+        
+        log_event(
+            db,
+            level="INFO",
+            source="dispatch",
+            event="DISPATCH_START",
+            payload={
+                "state": session.current_state.value,
+                "text": event.text,
+                "callback": event.callback_data,
+            },
+            tenant_id=tenant.id,
+            conversation_session_id=session.id,
+        )
 
         if session.last_incoming_update_id and event.update_id <= session.last_incoming_update_id:
             return []
@@ -161,6 +188,16 @@ class RecruitmentService:
         return [{"text": "Estado no soportado. Te derivo con RRHH."}]
 
     def start_conversation(self, db, tenant, session, event):
+        
+        log_event(
+            db,
+            level="INFO",
+            source="onboarding",
+            event="PHONE_CAPTURE",
+            payload={"phone": raw_phone},
+            tenant_id=tenant.id,
+        )
+    
         raw_phone = event.contact_phone
         if raw_phone:
             phone = normalize_phone(raw_phone)
@@ -216,6 +253,17 @@ class RecruitmentService:
         return app
 
     def select_vacancy(self, db, tenant, session, event):
+    
+        log_event(
+            db,
+            level="INFO",
+            source="application",
+            event="VACANCY_SELECTED",
+            payload={"vacancy_id": vacancy_id},
+            tenant_id=tenant.id,
+            conversation_session_id=session.id,
+        )
+    
         if not event.callback_data or not event.callback_data.startswith("vac:"):
             return self._invalid(session, "Debes seleccionar una vacante usando los botones.")
 
@@ -274,6 +322,20 @@ class RecruitmentService:
         return self.process_cv(db, tenant, session, event, background_tasks)
 
     def process_cv(self, db, tenant, session, event, background_tasks):
+    
+        log_event(
+            db,
+            level="INFO",
+            source="cv",
+            event="CV_RECEIVED",
+            payload={
+                "filename": filename,
+                "size": size_bytes,
+                "mime": mime_type,
+            },
+            application_id=app.id,
+        )    
+        
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
         gateway = TelegramGateway(tenant.telegram_bot_token)
         file_bytes, file_meta = gateway.get_file_bytes(event.document["file_id"])
@@ -334,6 +396,16 @@ class RecruitmentService:
         return [{"text": prompt}]
 
     def ask_questions(self, db, tenant, session, event):
+    
+        log_event(
+            db,
+            level="INFO",
+            source="questions",
+            event="ANSWER_RECEIVED",
+            payload={"field": vq.field_key, "value": event.text},
+            application_id=app.id,
+        )
+        
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
         questions = self._get_ordered_questions(db, app.vacancy_id)
         idx = int(session.state_payload.get("question_index", 0))
@@ -545,6 +617,16 @@ class RecruitmentService:
         return [{"text": message}]
 
     def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
+    
+        log_event(
+            db,
+            level="INFO",
+            source="cv_pipeline",
+            event="START",
+            tenant_id=tenant_id,
+            application_id=application_id,
+        )
+        
         with SessionLocal() as db:
             tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one()
             app = db.execute(select(Application).where(Application.id == application_id)).scalar_one()
@@ -600,6 +682,16 @@ class RecruitmentService:
                 ai_eval.status = AiEvalStatus.SUCCESS
                 ai_eval.attempts += 1
                 app.status = ApplicationStatus.SCORING
+                
+                log_event(
+                    db,
+                    level="INFO",
+                    source="llm",
+                    event="RESPONSE",
+                    payload=payload.model_dump(),
+                    application_id=app.id,
+                )
+                
             except Exception as exc:
                 ai_eval.status = AiEvalStatus.FAILED
                 ai_eval.error_message = str(exc)

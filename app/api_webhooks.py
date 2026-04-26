@@ -6,6 +6,7 @@ from app.core import get_db, settings, Classification
 from app.models import Application, Candidate, Tenant, Vacancy
 from app.scoring import RecruitmentService
 from app.telegram_api import TelegramGateway, parse_telegram_update
+from app.logger import log_event
 
 import traceback
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, HTTPException, Request
@@ -30,6 +31,15 @@ async def telegram_webhook(tenant_slug: str, request: Request, background_tasks:
 
     try:
         payload = await request.json()
+
+        log_event(
+            db,
+            level="INFO",
+            source="webhook",
+            event="INCOMING_UPDATE",
+            payload=payload,
+            tenant_id=tenant.id,
+        )
 
         # 🔹 1. Obtener tenant PRIMERO
         tenant = db.query(Tenant).filter(Tenant.slug == tenant_slug).first()
@@ -62,6 +72,24 @@ async def telegram_webhook(tenant_slug: str, request: Request, background_tasks:
 
         # 🔹 4. Aquí irá tu state machine    
         event = parse_telegram_update(payload)
+        
+        event = parse_telegram_update(payload)
+
+        log_event(
+            db,
+            level="INFO",
+            source="webhook",
+            event="PARSED_EVENT",
+            payload={
+                "chat_id": event.chat_id,
+                "text": event.text,
+                "has_contact": bool(event.contact_phone),
+                "has_document": bool(event.document),
+                "callback": event.callback_data,
+            },
+            tenant_id=tenant.id,
+        )
+        
         service = RecruitmentService()
         tg = TelegramGateway(tenant.telegram_bot_token)
 

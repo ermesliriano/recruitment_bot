@@ -57,6 +57,16 @@ class LlmClient:
         self.client = httpx.Client(timeout=120)
 
     def evaluate_cv(self, vacancy: dict[str, Any], cv_text: str) -> tuple[LlmEvaluationPayload, str, int]:
+    
+        log_event(
+            db,
+            level="INFO",
+            source="llm",
+            event="REQUEST",
+            payload={"text_length": len(text)},
+            application_id=app.id,
+        )
+        
         prompt = PROMPT_TEMPLATE.format(
             title=vacancy["title"],
             description=vacancy["description"],
@@ -95,6 +105,15 @@ class LlmClient:
                 validated = LlmEvaluationPayload.model_validate(obj)
                 return validated, raw, latency_ms
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+                log_event(
+                    db,
+                    level="ERROR",
+                    source="llm",
+                    event="FAILURE",
+                    message=str(exc),
+                    exc=exc,
+                    application_id=app.id,
+                )
                 last_error = exc
                 prompt = prompt + "\n\nTu respuesta anterior no fue JSON válido. Repite devolviendo únicamente JSON válido."
 
