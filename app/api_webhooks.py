@@ -41,15 +41,6 @@ async def telegram_webhook(tenant_slug: str, request: Request, background_tasks:
                 content={"error": f"Tenant not found: {tenant_slug}"}
             )
 
-        log_event(
-            db,
-            level="INFO",
-            source="webhook",
-            event="INCOMING_UPDATE",
-            payload=payload,
-            tenant_id=tenant.id,
-        )
-
         # 🔹 2. Validar secret
         secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
 
@@ -75,21 +66,6 @@ async def telegram_webhook(tenant_slug: str, request: Request, background_tasks:
         
         event = parse_telegram_update(payload)
 
-        log_event(
-            db,
-            level="INFO",
-            source="webhook",
-            event="PARSED_EVENT",
-            payload={
-                "chat_id": event.chat_id,
-                "text": event.text,
-                "has_contact": bool(event.contact_phone),
-                "has_document": bool(event.document),
-                "callback": event.callback_data,
-            },
-            tenant_id=tenant.id,
-        )
-        
         service = RecruitmentService()
         tg = TelegramGateway(tenant.telegram_bot_token)
 

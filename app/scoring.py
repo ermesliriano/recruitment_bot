@@ -93,20 +93,6 @@ class RecruitmentService:
         self.llm = LlmClient()
 
     def transition(self, session: ConversationSession, next_state: ChatState) -> None:
-        db = SessionLocal()
-    
-        log_event(
-            db,
-            level="INFO",
-            source="state_machine",
-            event="STATE_TRANSITION",
-            payload={
-                "from": session.current_state.value,
-                "to": next_state.value,
-            },
-            conversation_session_id=session.id,
-        )
-        
         if next_state not in ALLOWED_TRANSITIONS[session.current_state]:
             raise RuntimeError(f"Transición inválida {session.current_state} -> {next_state}")
         session.current_state = next_state
@@ -139,20 +125,6 @@ class RecruitmentService:
 
     def dispatch(self, db, tenant: Tenant, event: IncomingEvent, background_tasks) -> list[dict[str, Any]]:
         session = self.get_or_create_session(db, tenant.id, event.chat_id, event.user_id)
-        
-        log_event(
-            db,
-            level="INFO",
-            source="dispatch",
-            event="DISPATCH_START",
-            payload={
-                "state": session.current_state.value,
-                "text": event.text,
-                "callback": event.callback_data,
-            },
-            tenant_id=tenant.id,
-            conversation_session_id=session.id,
-        )
 
         if session.last_incoming_update_id and event.update_id <= session.last_incoming_update_id:
             return []
@@ -191,16 +163,7 @@ class RecruitmentService:
 
     def start_conversation(self, db, tenant, session, event):
         raw_phone = event.contact_phone
-        
-        log_event(
-            db,
-            level="INFO",
-            source="onboarding",
-            event="PHONE_CAPTURE",
-            payload={"phone": raw_phone},
-            tenant_id=tenant.id,
-        )
-        
+                
         if raw_phone:
             phone = normalize_phone(raw_phone)
             candidate = db.execute(
@@ -265,16 +228,6 @@ class RecruitmentService:
         ).scalar_one_or_none()
         if not vacancy:
             return self._invalid(session, "La vacante ya no está disponible.")
-            
-        log_event(
-            db,
-            level="INFO",
-            source="application",
-            event="VACANCY_SELECTED",
-            payload={"vacancy_id": vacancy_id},
-            tenant_id=tenant.id,
-            conversation_session_id=session.id,
-        )
 
         application = self.create_application(db, tenant.id, session.candidate_id, vacancy.id)
         session.application_id = application.id
@@ -325,20 +278,6 @@ class RecruitmentService:
 
     def process_cv(self, db, tenant, session, event, background_tasks):
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
-        
-        log_event(
-            db,
-            level="INFO",
-            source="cv",
-            event="CV_RECEIVED",
-            payload={
-                "filename": filename,
-                "size": size_bytes,
-                "mime": mime_type,
-            },
-            application_id=app.id,
-        )
-        
         gateway = TelegramGateway(tenant.telegram_bot_token)
         file_bytes, file_meta = gateway.get_file_bytes(event.document["file_id"])
 
@@ -398,18 +337,7 @@ class RecruitmentService:
         return [{"text": prompt}]
 
     def ask_questions(self, db, tenant, session, event):
-
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
-        
-        log_event(
-            db,
-            level="INFO",
-            source="questions",
-            event="ANSWER_RECEIVED",
-            payload={"field": vq.field_key, "value": event.text},
-            application_id=app.id,
-        )
-        
         questions = self._get_ordered_questions(db, app.vacancy_id)
         idx = int(session.state_payload.get("question_index", 0))
         if idx >= len(questions):
@@ -484,21 +412,6 @@ class RecruitmentService:
         return Classification.REJECT, total
 
     def apply_scoring(self, db, app: Application, session: ConversationSession):
-    
-        log_event(
-            db,
-            level="INFO",
-            source="scoring",
-            event="FINAL_SCORE",
-            payload={
-                "score_rules": str(score_rules),
-                "score_cv": str(score_cv),
-                "total": str(total),
-                "classification": classification.value,
-            },
-            application_id=app.id,
-        )
-                
         vacancy = db.execute(select(Vacancy).where(Vacancy.id == app.vacancy_id)).scalar_one()
         answers = db.execute(select(Answer).where(Answer.application_id == app.id)).scalars().all()
         ai_eval = db.execute(select(AiEvaluation).where(AiEvaluation.application_id == app.id)).scalar_one_or_none()
@@ -635,16 +548,6 @@ class RecruitmentService:
         return [{"text": message}]
 
     def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
-    
-        log_event(
-            db,
-            level="INFO",
-            source="cv_pipeline",
-            event="START",
-            tenant_id=tenant_id,
-            application_id=application_id,
-        )
-        
         with SessionLocal() as db:
             tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one()
             app = db.execute(select(Application).where(Application.id == application_id)).scalar_one()
@@ -700,15 +603,6 @@ class RecruitmentService:
                 ai_eval.status = AiEvalStatus.SUCCESS
                 ai_eval.attempts += 1
                 app.status = ApplicationStatus.SCORING
-                
-                log_event(
-                    db,
-                    level="INFO",
-                    source="llm",
-                    event="RESPONSE",
-                    payload=payload.model_dump(),
-                    application_id=app.id,
-                )
                 
             except Exception as exc:
                 ai_eval.status = AiEvalStatus.FAILED

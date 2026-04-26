@@ -87,33 +87,12 @@ class TelegramGateway:
         return resp.json()
 
     def send_message(self, chat_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            log_event(
-                db,
-                level="INFO",
-                source="telegram",
-                event="SEND_MESSAGE",
-                payload={
-                    "chat_id": chat_id,
-                    "text": text,
-                },
-            )
-            
-            payload = {"chat_id": chat_id, "text": text}
-            if reply_markup:
-                payload["reply_markup"] = reply_markup
-            resp = self.client.post(f"{self.base}/sendMessage", json=payload)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as exc:
-            log_event(
-                db,
-                level="ERROR",
-                source="telegram",
-                event="SEND_ERROR",
-                message=str(exc),
-                exc=exc,
-            )
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        resp = self.client.post(f"{self.base}/sendMessage", json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
     def answer_callback_query(self, callback_query_id: str) -> None:
         self.client.post(f"{self.base}/answerCallbackQuery", json={"callback_query_id": callback_query_id})

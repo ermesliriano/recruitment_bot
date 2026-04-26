@@ -98,15 +98,6 @@ class LlmClient:
                 validated = LlmEvaluationPayload.model_validate(obj)
                 return validated, raw, latency_ms
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-                log_event(
-                    db,
-                    level="ERROR",
-                    source="llm",
-                    event="FAILURE",
-                    message=str(exc),
-                    exc=exc,
-                    application_id=app.id,
-                )
                 last_error = exc
                 prompt = prompt + "\n\nTu respuesta anterior no fue JSON válido. Repite devolviendo únicamente JSON válido."
 
