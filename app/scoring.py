@@ -887,26 +887,42 @@ class RecruitmentService:
 
                 except Exception as exc:
 
+                    error_message = str(exc)
+                    response_text = None
+
+                    # 🔥 EXTRAER RESPONSE REAL DEL 403 (CLAVE)
+                    try:
+                        if hasattr(exc, "response") and exc.response is not None:
+                            response_text = exc.response.text[:1000]  # más margen para debug
+                    except Exception:
+                        response_text = "unable_to_extract_response"
+
+                    # 🔥 ACTUALIZAR ESTADO AI (sin romper flujo)
                     try:
                         ai_eval.status = AiEvalStatus.FAILED
-                        ai_eval.error_message = str(exc)
+                        ai_eval.error_message = error_message
                         ai_eval.attempts += 1
                     except Exception:
-                        pass  # nunca romper logging
+                        pass
 
+                    # 🔥 LOG COMPLETO (ESTE ES EL IMPORTANTE)
                     log_event(
                         db=db,
                         level="ERROR",
                         source="cv_pipeline",
                         event="LLM_CALL_FAILED",
-                        message=str(exc),
+                        message=error_message,
+                        payload={
+                            "response": response_text
+                        },
                         exc=exc,
                         application_id=app.id
                     )
-                    
-                    if ai_eval.status == AiEvalStatus.FAILED:
-                        db.commit()
-                        return
+
+                    # 🔥 COMMIT PARA NO PERDER EL ERROR EN RENDER
+                    db.commit()
+
+                    return
 
                 # =========================
                 # TRIGGER SCORING
