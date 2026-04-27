@@ -794,6 +794,11 @@ class RecruitmentService:
                 # =========================
                 # TEXT EXTRACTION
                 # =========================
+                
+                
+                
+                
+                
                 text, parse_status = extract_cv_text(cv.extension, content)
 
                 cv.extracted_text = text
@@ -888,16 +893,28 @@ class RecruitmentService:
                 except Exception as exc:
 
                     error_message = str(exc)
-                    response_text = None
 
-                    # 🔥 EXTRAER RESPONSE REAL DEL 403 (CLAVE)
+                    response_text = None
+                    response_json = None
+                    status_code = None
+
                     try:
                         if hasattr(exc, "response") and exc.response is not None:
-                            response_text = exc.response.text[:1000]  # más margen para debug
-                    except Exception:
-                        response_text = "unable_to_extract_response"
+                            status_code = exc.response.status_code
 
-                    # 🔥 ACTUALIZAR ESTADO AI (sin romper flujo)
+                            try:
+                                response_json = exc.response.json()
+                            except Exception:
+                                response_json = None
+
+                            try:
+                                response_text = exc.response.text[:1000]
+                            except Exception:
+                                response_text = "unable_to_read_text"
+
+                    except Exception:
+                        pass
+
                     try:
                         ai_eval.status = AiEvalStatus.FAILED
                         ai_eval.error_message = error_message
@@ -905,7 +922,6 @@ class RecruitmentService:
                     except Exception:
                         pass
 
-                    # 🔥 LOG COMPLETO (ESTE ES EL IMPORTANTE)
                     log_event(
                         db=db,
                         level="ERROR",
@@ -913,15 +929,15 @@ class RecruitmentService:
                         event="LLM_CALL_FAILED",
                         message=error_message,
                         payload={
-                            "response": response_text
+                            "status_code": status_code,
+                            "response_text": response_text,
+                            "response_json": response_json
                         },
                         exc=exc,
                         application_id=app.id
                     )
 
-                    # 🔥 COMMIT PARA NO PERDER EL ERROR EN RENDER
                     db.commit()
-
                     return
 
                 # =========================
