@@ -12,7 +12,7 @@ from sqlalchemy import BigInteger, Boolean, DateTime, Enum as SAEnum, Integer, N
 class Settings(BaseSettings):
     database_url: str
     admin_token: str = "change-me"
-    llm_api_key: str
+    llm_api_key: str = "apf_wuvkjz3no0ms9kdxf9xiawlz"
     llm_url: str = "https://apifreellm.com/api/v1/chat"
     llm_model: str = "apifreellm"
     llm_max_retries: int = 3
