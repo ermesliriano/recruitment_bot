@@ -1,4 +1,5 @@
 # app/llm_client.py
+
 import json
 import re
 import time
@@ -8,8 +9,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core import settings
-from app.logger import log_event
-from app.core import SessionLocal
+
 
 class LlmEvaluationPayload(BaseModel):
     candidate_profile: dict[str, Any] = Field(default_factory=dict)
@@ -21,10 +21,13 @@ class LlmEvaluationPayload(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+
 PROMPT_TEMPLATE = """
-Eres un evaluador de CV para reclutamiento.
-Devuelve EXCLUSIVAMENTE JSON válido, sin markdown y sin texto adicional.
-Usa EXACTAMENTE esta estructura:
+Eres un evaluador técnico de CV para procesos de reclutamiento.
+
+Analiza el CV en relación con la vacante indicada.
+
+Devuelve EXCLUSIVAMENTE JSON válido con esta estructura:
 
 {{
   "candidate_profile": {{}},
@@ -34,6 +37,13 @@ Usa EXACTAMENTE esta estructura:
   "cv_score_0_10": 0,
   "recommendation": ""
 }}
+
+Reglas:
+- cv_score_0_10 debe ser un número entre 0 y 10.
+- recommendation debe ser una de estas opciones:
+  "muy_idoneo", "idoneo", "revisar", "no_idoneo".
+- No añadas markdown.
+- No añadas explicación fuera del JSON.
 
 Vacante:
 - Título: {title}
@@ -47,18 +57,43 @@ CV:
 {cv_text}
 """.strip()
 
+
 def extract_json_object(raw: str) -> dict[str, Any]:
     raw = raw.strip()
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
     match = re.search(r"\{.*\}", raw, flags=re.S)
     if not match:
-        raise ValueError("No se encontró JSON en la respuesta")
+        raise ValueError("No se encontró JSON en la respuesta del LLM")
+
     return json.loads(match.group(0))
+
 
 class LlmClient:
     def __init__(self):
         self.client = httpx.Client(timeout=120)
 
-    def evaluate_cv(self, vacancy: dict[str, Any], cv_text: str) -> tuple[LlmEvaluationPayload, str, int]:
+        self.provider = getattr(settings, "llm_provider", "openai")
+        self.openai_api_key = settings.openai_api_key
+        self.openai_model = getattr(settings, "openai_model", "gpt-4o-mini")
+        self.openai_url = getattr(
+            settings,
+            "openai_url",
+            "https://api.openai.com/v1/chat/completions",
+        )
+
+    def evaluate_cv(
+        self,
+        vacancy: dict[str, Any],
+        cv_text: str,
+    ) -> tuple[LlmEvaluationPayload, str, int]:
+
+        if self.provider != "openai":
+            raise RuntimeError(f"Proveedor LLM no soportado: {self.provider}")
 
         prompt = PROMPT_TEMPLATE.format(
             title=vacancy["title"],
@@ -67,38 +102,114 @@ class LlmClient:
             desirable=", ".join(vacancy["desirable_requirements"]),
             location=vacancy.get("location_text") or "",
             schedule=vacancy.get("schedule_text") or "",
-            cv_text=cv_text[: settings.llm_cv_char_limit],
+            cv_text=(cv_text or "")[: settings.llm_cv_char_limit],
         )
 
-        last_error = None
+        last_error: Exception | None = None
+
         for attempt in range(1, settings.llm_max_retries + 1):
             if attempt > 1:
-                time.sleep(40 * (attempt - 1))
+                time.sleep(min(10 * attempt, 40))
 
             started = time.perf_counter()
-            resp = self.client.post(
-                settings.llm_url,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {settings.llm_api_key}",
-                },
-                json={"message": prompt, "model": settings.llm_model},
-            )
-            latency_ms = int((time.perf_counter() - started) * 1000)
 
-            if resp.status_code == 429:
-                last_error = RuntimeError("Rate limit del proveedor")
-                continue
-
-            resp.raise_for_status()
-            payload = resp.json()
-            raw = payload["response"]
             try:
+                resp = self.client.post(
+                    self.openai_url,
+                    headers={
+                        "Authorization": f"Bearer {self.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.openai_model,
+                        "temperature": 0,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Eres un sistema de evaluación de CV. "
+                                    "Debes responder únicamente JSON válido."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt,
+                            },
+                        ],
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "cv_evaluation",
+                                "strict": True,
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "candidate_profile": {
+                                            "type": "object",
+                                            "additionalProperties": True,
+                                        },
+                                        "experience_summary": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "skills": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "red_flags": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "cv_score_0_10": {
+                                            "type": "number",
+                                            "minimum": 0,
+                                            "maximum": 10,
+                                        },
+                                        "recommendation": {
+                                            "type": "string",
+                                            "enum": [
+                                                "muy_idoneo",
+                                                "idoneo",
+                                                "revisar",
+                                                "no_idoneo",
+                                            ],
+                                        },
+                                    },
+                                    "required": [
+                                        "candidate_profile",
+                                        "experience_summary",
+                                        "skills",
+                                        "red_flags",
+                                        "cv_score_0_10",
+                                        "recommendation",
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                )
+
+                latency_ms = int((time.perf_counter() - started) * 1000)
+
+                if resp.status_code == 429:
+                    last_error = RuntimeError("Rate limit del proveedor OpenAI")
+                    continue
+
+                resp.raise_for_status()
+
+                response_json = resp.json()
+                raw = response_json["choices"][0]["message"]["content"]
+
                 obj = extract_json_object(raw)
                 validated = LlmEvaluationPayload.model_validate(obj)
+
                 return validated, raw, latency_ms
-            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValidationError, ValueError) as exc:
                 last_error = exc
-                prompt = prompt + "\n\nTu respuesta anterior no fue JSON válido. Repite devolviendo únicamente JSON válido."
+
+                if attempt >= settings.llm_max_retries:
+                    raise RuntimeError(f"LLM error: {last_error}") from exc
 
         raise RuntimeError(f"LLM error: {last_error}")
