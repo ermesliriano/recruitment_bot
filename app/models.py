@@ -14,17 +14,16 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
-    text
+    text,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
-from app.core import (
-    Base,
-    utcnow,
-    AnswerType,
+from app.database import Base, utcnow
+from app.enums import (
     AiEvalStatus,
+    AnswerType,
     ApplicationStatus,
     ChatState,
     Classification,
@@ -36,8 +35,10 @@ from app.core import (
     VacancyStatus,
 )
 
+
 class Tenant(Base):
     __tablename__ = "tenants"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255))
@@ -46,9 +47,12 @@ class Tenant(Base):
     telegram_webhook_secret: Mapped[str | None] = mapped_column(Text)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class Vacancy(Base):
     __tablename__ = "vacancies"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     code: Mapped[str] = mapped_column(String(80))
@@ -63,21 +67,35 @@ class Vacancy(Base):
     benefits: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
     faq_context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     cv_score_factor: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("6.00"))
-    classification_thresholds: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    status: Mapped[VacancyStatus] = mapped_column(SAEnum(VacancyStatus, name="vacancy_status_enum"))
+    classification_thresholds: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=lambda: {"review": 35, "interview": 60, "shortlist": 75}
+    )
+    status: Mapped[VacancyStatus] = mapped_column(
+        SAEnum(VacancyStatus, name="vacancy_status_enum", create_type=False),
+        default=VacancyStatus.DRAFT,
+    )
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow(), onupdate=utcnow())
+
 
 class Question(Base):
     __tablename__ = "questions"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     code: Mapped[str] = mapped_column(String(80))
     prompt_text: Mapped[str] = mapped_column(Text)
-    answer_type: Mapped[AnswerType] = mapped_column(SAEnum(AnswerType, name="answer_type_enum"))
+    answer_type: Mapped[AnswerType] = mapped_column(
+        SAEnum(AnswerType, name="answer_type_enum", create_type=False)
+    )
     default_validation: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class VacancyQuestion(Base):
     __tablename__ = "vacancy_questions"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     vacancy_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
@@ -89,16 +107,23 @@ class VacancyQuestion(Base):
     required: Mapped[bool] = mapped_column(Boolean, default=True)
     scoring_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class ScoringRule(Base):
     __tablename__ = "scoring_rules"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     vacancy_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     name: Mapped[str] = mapped_column(String(255))
-    source_scope: Mapped[SourceScope] = mapped_column(SAEnum(SourceScope, name="source_scope_enum"))
+    source_scope: Mapped[SourceScope] = mapped_column(
+        SAEnum(SourceScope, name="source_scope_enum", create_type=False)
+    )
     field_key: Mapped[str] = mapped_column(String(120))
-    operator: Mapped[ScoringOperator] = mapped_column(SAEnum(ScoringOperator, name="scoring_operator_enum"))
+    operator: Mapped[ScoringOperator] = mapped_column(
+        SAEnum(ScoringOperator, name="scoring_operator_enum", create_type=False)
+    )
     expected_text: Mapped[str | None] = mapped_column(Text)
     expected_number: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     expected_boolean: Mapped[bool | None] = mapped_column(Boolean)
@@ -106,9 +131,12 @@ class ScoringRule(Base):
     is_disqualifier: Mapped[bool] = mapped_column(Boolean, default=False)
     priority: Mapped[int] = mapped_column(Integer, default=100)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class Candidate(Base):
     __tablename__ = "candidates"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     phone_e164: Mapped[str] = mapped_column(String(32), index=True)
@@ -118,24 +146,35 @@ class Candidate(Base):
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class Application(Base):
     __tablename__ = "applications"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     candidate_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     vacancy_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
-    status: Mapped[ApplicationStatus] = mapped_column(SAEnum(ApplicationStatus, name="application_status_enum"))
+    status: Mapped[ApplicationStatus] = mapped_column(
+        SAEnum(ApplicationStatus, name="application_status_enum", create_type=False),
+        default=ApplicationStatus.DRAFT,
+    )
     score_rules: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=Decimal("0"))
     score_cv: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     score_total: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
-    classification: Mapped[Classification | None] = mapped_column(SAEnum(Classification, name="classification_enum"))
+    classification: Mapped[Classification | None] = mapped_column(
+        SAEnum(Classification, name="classification_enum", create_type=False)
+    )
     is_disqualified: Mapped[bool] = mapped_column(Boolean, default=False)
     disqualification_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow(), onupdate=utcnow())
+
 
 class Answer(Base):
     __tablename__ = "answers"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     application_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
@@ -146,9 +185,12 @@ class Answer(Base):
     answer_boolean: Mapped[bool | None] = mapped_column(Boolean)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class CvDocument(Base):
     __tablename__ = "cv_documents"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     application_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
@@ -160,19 +202,30 @@ class CvDocument(Base):
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     telegram_file_id: Mapped[str | None] = mapped_column(String(255))
     telegram_file_unique_id: Mapped[str | None] = mapped_column(String(255))
-    storage_backend: Mapped[StorageBackendType] = mapped_column(SAEnum(StorageBackendType, name="storage_backend_enum"))
+    storage_backend: Mapped[StorageBackendType] = mapped_column(
+        SAEnum(StorageBackendType, name="storage_backend_enum", create_type=False)
+    )
     storage_key: Mapped[str] = mapped_column(String(255))
     content: Mapped[bytes | None] = mapped_column(BYTEA)
     extracted_text: Mapped[str | None] = mapped_column(Text)
-    parse_status: Mapped[CvParseStatus] = mapped_column(SAEnum(CvParseStatus, name="cv_parse_status_enum"))
+    parse_status: Mapped[CvParseStatus] = mapped_column(
+        SAEnum(CvParseStatus, name="cv_parse_status_enum", create_type=False),
+        default=CvParseStatus.PENDING,
+    )
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class AiEvaluation(Base):
     __tablename__ = "ai_evaluations"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     application_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
     cv_document_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
-    status: Mapped[AiEvalStatus] = mapped_column(SAEnum(AiEvalStatus, name="ai_eval_status_enum"))
+    status: Mapped[AiEvalStatus] = mapped_column(
+        SAEnum(AiEvalStatus, name="ai_eval_status_enum", create_type=False),
+        default=AiEvalStatus.PENDING,
+    )
     raw_response: Mapped[str | None] = mapped_column(Text)
     parsed_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     candidate_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
@@ -183,38 +236,46 @@ class AiEvaluation(Base):
     recommendation: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+
 
 class ConversationSession(Base):
     __tablename__ = "conversation_sessions"
+
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
-    platform: Mapped[Platform] = mapped_column(SAEnum(Platform, name="platform_enum"))
+    platform: Mapped[Platform] = mapped_column(
+        SAEnum(Platform, name="platform_enum", create_type=False),
+        default=Platform.TELEGRAM,
+    )
     platform_chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
     platform_user_id: Mapped[int | None] = mapped_column(BigInteger)
     candidate_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
     application_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
-    current_state: Mapped[ChatState] = mapped_column(SAEnum(ChatState, name="state_enum"))
+    current_state: Mapped[ChatState] = mapped_column(
+        SAEnum(ChatState, name="state_enum", create_type=False),
+        default=ChatState.WELCOME,
+    )
     state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_incoming_update_id: Mapped[int | None] = mapped_column(BigInteger)
     invalid_input_count: Mapped[int] = mapped_column(Integer, default=0)
     version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow())
+    updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=utcnow(), onupdate=utcnow())
+
 
 class SystemLog(Base):
     __tablename__ = "system_logs"
 
     id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-
     tenant_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
     level: Mapped[str] = mapped_column(String)
     source: Mapped[str] = mapped_column(String)
     event: Mapped[str] = mapped_column(String)
-
     message: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict | None] = mapped_column(JSONB)
     traceback: Mapped[str | None] = mapped_column(Text)
-
     application_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
     conversation_session_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True))
-
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
