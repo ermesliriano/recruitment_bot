@@ -126,67 +126,13 @@ class LlmClient:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": (
-                                    "Eres un sistema de evaluación de CV. "
-                                    "Debes responder únicamente JSON válido."
-                                ),
+                                "content": "Responde únicamente JSON válido."
                             },
                             {
                                 "role": "user",
                                 "content": prompt,
                             },
                         ],
-                        "response_format": {
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": "cv_evaluation",
-                                "strict": True,
-                                "schema": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "properties": {
-                                        "candidate_profile": {
-                                            "type": "object",
-                                            "additionalProperties": True,
-                                        },
-                                        "experience_summary": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                        "skills": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                        "red_flags": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                        "cv_score_0_10": {
-                                            "type": "number",
-                                            "minimum": 0,
-                                            "maximum": 10,
-                                        },
-                                        "recommendation": {
-                                            "type": "string",
-                                            "enum": [
-                                                "muy_idoneo",
-                                                "idoneo",
-                                                "revisar",
-                                                "no_idoneo",
-                                            ],
-                                        },
-                                    },
-                                    "required": [
-                                        "candidate_profile",
-                                        "experience_summary",
-                                        "skills",
-                                        "red_flags",
-                                        "cv_score_0_10",
-                                        "recommendation",
-                                    ],
-                                },
-                            },
-                        },
                     },
                 )
 
