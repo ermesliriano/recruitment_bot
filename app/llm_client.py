@@ -71,6 +71,17 @@ def extract_json_object(raw: str) -> dict[str, Any]:
         raise ValueError("No se encontró JSON en la respuesta del LLM")
 
     return json.loads(match.group(0))
+    
+def normalize_payload(obj: dict) -> dict:
+    exp = obj.get("experience_summary")
+
+    if isinstance(exp, list) and exp and isinstance(exp[0], dict):
+        obj["experience_summary"] = [
+            f"{e.get('company', '')} - {e.get('role', '')}".strip()
+            for e in exp
+        ]
+
+    return obj
 
 
 class LlmClient:
@@ -148,6 +159,7 @@ class LlmClient:
                 raw = response_json["choices"][0]["message"]["content"]
 
                 obj = extract_json_object(raw)
+                obj = normalize_payload(obj)
                 validated = LlmEvaluationPayload.model_validate(obj)
 
                 return validated, raw, latency_ms
