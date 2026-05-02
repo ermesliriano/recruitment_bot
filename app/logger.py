@@ -1,9 +1,12 @@
+# app/logger.py
 import traceback
-from app.models import SystemLog
-from app.core import SessionLocal
+
+from app.core.db import SessionLocal
+from app.models.session import SystemLog
+
 
 def log_event(
-    db=None,  # mantenido por compatibilidad, ya no se usa para escribir
+    db=None,
     *,
     level: str,
     source: str,
@@ -14,10 +17,9 @@ def log_event(
     application_id=None,
     conversation_session_id=None,
     exc: Exception = None,
-):
-    """Escribe un log en su propia sesión y hace commit inmediato,
-    de modo que el registro sobrevive aunque la transacción llamante
-    haga rollback."""
+) -> None:
+    """Escribe un log en su propia sesión independiente para que sobreviva
+    a un rollback de la transacción llamante."""
     log_db = SessionLocal()
     try:
         log = SystemLog(

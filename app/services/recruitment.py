@@ -1,6 +1,6 @@
 # app/services/recruitment.py
 """
-RecruitmentService: máquina de estados de la conversación + orquestador del pipeline de CV.
+RecruitmentService: máquina de estados de la conversación.
 """
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from typing import Any
 
 from sqlalchemy import case, select
 
-from app.config import settings
-from app.database import SessionLocal
+from app.core.config import settings
+from app.core.db import SessionLocal
 from app.enums import (
     AiEvalStatus,
     ApplicationStatus,
@@ -29,12 +29,12 @@ from app.models import (
     Application,
     Candidate,
     ConversationSession,
+    CvDocument,
     Question,
     ScoringRule,
     Tenant,
     Vacancy,
     VacancyQuestion,
-    CvDocument,
 )
 from app.services.scoring import classify_candidate, compare_rule, norm, validate_answer
 from app.cv_pipeline import (
@@ -65,8 +65,8 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
 
 def detect_human_request(event: IncomingEvent) -> bool:
     text = norm(event.text)
-    return text in {"humano", "asesor", "rrhh", "reclutador", "agent", "human"} or \
-        event.callback_data == "go:human"
+    return text in {"humano", "asesor", "rrhh", "reclutador", "agent", "human"} \
+        or event.callback_data == "go:human"
 
 
 def answer_faq_question(faq_context: dict[str, Any], user_question: str) -> str | None:
@@ -85,7 +85,7 @@ class RecruitmentService:
     def __init__(self) -> None:
         self.llm = LlmClient()
 
-    # ─── State machine ───────────────────────────────────────────────────────
+    # ── State machine ────────────────────────────────────────────────────────
 
     def _transition(self, session: ConversationSession, next_state: ChatState) -> None:
         allowed = ALLOWED_TRANSITIONS.get(session.current_state, set())
@@ -94,9 +94,7 @@ class RecruitmentService:
         session.current_state = next_state
         session.version += 1
 
-    def _get_or_create_session(
-        self, db, tenant_id, chat_id: int, user_id: int | None
-    ) -> ConversationSession:
+    def _get_or_create_session(self, db, tenant_id, chat_id: int, user_id: int | None) -> ConversationSession:
         session = db.execute(
             select(ConversationSession)
             .where(
@@ -132,7 +130,6 @@ class RecruitmentService:
     def dispatch(self, db, tenant: Tenant, event: IncomingEvent, background_tasks) -> list[dict[str, Any]]:
         session = self._get_or_create_session(db, tenant.id, event.chat_id, event.user_id)
 
-        # Deduplicación por update_id
         if session.last_incoming_update_id and event.update_id <= session.last_incoming_update_id:
             return []
         session.last_incoming_update_id = event.update_id
@@ -140,7 +137,6 @@ class RecruitmentService:
         if detect_human_request(event):
             return self._escalate_human(db, session, "Solicitud explícita de humano")
 
-        # Restart desde CONFIRM_AND_CLOSE
         if session.current_state == ChatState.CONFIRM_AND_CLOSE and norm(event.text) == "/start":
             self._transition(session, ChatState.SELECT_VACANCY)
             return self._show_vacancies(db, tenant, session)
@@ -152,7 +148,7 @@ class RecruitmentService:
             ChatState.VACANCY_QA_MODE: self._handle_vacancy_qa,
             ChatState.REQUEST_CV: self._handle_request_cv,
             ChatState.ASK_VACANCY_QUESTIONS: self._handle_ask_questions,
-            ChatState.SCORING: lambda *_: [{"text": "Estoy evaluando tu candidatura. Te escribiré en breve."}],
+            ChatState.SCORING: lambda db, t, s, e: [{"text": "Estoy evaluando tu candidatura. Te escribiré en breve."}],
         }
 
         handler = handlers.get(session.current_state)
@@ -162,6 +158,8 @@ class RecruitmentService:
                 else handler(db, tenant, session, event)
 
         return [{"text": "Estado no soportado. Te derivo con RRHH."}]
+
+    # ── Handlers de estado ───────────────────────────────────────────────────
 
     def _handle_welcome(self, db, tenant, session, event):
         if event.contact_phone:
@@ -196,18 +194,14 @@ class RecruitmentService:
         }]
 
     def _show_vacancies(self, db, tenant, session):
-        from app.enums import VacancyStatus
         vacancies = db.execute(
             select(Vacancy.id, Vacancy.title)
-            .where(
-                Vacancy.tenant_id == tenant.id,
-                Vacancy.status == VacancyStatus.ACTIVE,
-            )
+            .where(Vacancy.tenant_id == tenant.id, Vacancy.status == "active")
             .order_by(Vacancy.created_at.desc())
         ).all()
 
         if not vacancies:
-            return [{"text": "Ahora mismo no hay vacantes activas. RRHH te contactará si abren nuevas posiciones."}]
+            return [{"text": "No hay vacantes activas. RRHH te contactará si abren nuevas posiciones."}]
 
         session.state_payload = {}
         return [{
@@ -219,13 +213,12 @@ class RecruitmentService:
         if not event.callback_data or not event.callback_data.startswith("vac:"):
             return self._invalid(session, "Debes seleccionar una vacante usando los botones.")
 
-        from app.enums import VacancyStatus
         vacancy_id = event.callback_data.split(":", 1)[1]
         vacancy = db.execute(
             select(Vacancy).where(
                 Vacancy.id == vacancy_id,
                 Vacancy.tenant_id == tenant.id,
-                Vacancy.status == VacancyStatus.ACTIVE,
+                Vacancy.status == "active",
             )
         ).scalar_one_or_none()
 
@@ -248,7 +241,7 @@ class RecruitmentService:
 
     def _handle_capture_name(self, db, tenant, session, event):
         if not event.text or len(event.text.strip()) < 3:
-            return self._invalid(session, "Por favor indica tu nombre completo (mínimo 3 caracteres).")
+            return self._invalid(session, "Indica tu nombre completo (mínimo 3 caracteres).")
 
         candidate = db.execute(select(Candidate).where(Candidate.id == session.candidate_id)).scalar_one()
         candidate.full_name = event.text.strip()
@@ -258,7 +251,7 @@ class RecruitmentService:
 
         self._transition(session, ChatState.VACANCY_QA_MODE)
         return [{
-            "text": "Perfecto. Antes de enviar tu CV puedes hacer preguntas sobre la vacante, o pulsa Continuar.",
+            "text": "Perfecto. Puedes hacer preguntas sobre la vacante o pulsa Continuar para enviar tu CV.",
             "reply_markup": TelegramGateway.qa_keyboard(),
         }]
 
@@ -331,10 +324,7 @@ class RecruitmentService:
         return db.execute(
             select(VacancyQuestion, Question)
             .join(Question, Question.id == VacancyQuestion.question_id)
-            .where(
-                VacancyQuestion.vacancy_id == vacancy_id,
-                VacancyQuestion.is_active.is_(True),
-            )
+            .where(VacancyQuestion.vacancy_id == vacancy_id, VacancyQuestion.is_active.is_(True))
             .order_by(VacancyQuestion.question_order.asc())
         ).all()
 
@@ -345,11 +335,8 @@ class RecruitmentService:
             db.commit()
             self._transition(session, ChatState.SCORING)
             return self._apply_scoring(db, app, session)
-
-        _, q = questions[idx]
-        vq = questions[idx][0]
-        prompt = vq.prompt_override or q.prompt_text
-        return [{"text": prompt}]
+        vq, q = questions[idx]
+        return [{"text": vq.prompt_override or q.prompt_text}]
 
     def _handle_ask_questions(self, db, tenant, session, event):
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
@@ -373,10 +360,7 @@ class RecruitmentService:
             return self._invalid(session, str(exc))
 
         answer = db.execute(
-            select(Answer).where(
-                Answer.application_id == app.id,
-                Answer.vacancy_question_id == vq.id,
-            )
+            select(Answer).where(Answer.application_id == app.id, Answer.vacancy_question_id == vq.id)
         ).scalar_one_or_none()
 
         if not answer:
@@ -394,12 +378,11 @@ class RecruitmentService:
         answer.answer_boolean = answer_boolean
         answer.raw_payload = {"raw_text": event.text}
         answer.is_valid = True
-
         session.state_payload = {**session.state_payload, "question_index": idx + 1}
         session.invalid_input_count = 0
         return self._ask_next_question(db, app, session)
 
-    # ─── Scoring ──────────────────────────────────────────────────────────────
+    # ── Scoring ───────────────────────────────────────────────────────────────
 
     def _apply_scoring(self, db, app: Application, session: ConversationSession) -> list[dict]:
         log_event(db=db, level="INFO", source="scoring", event="SCORING_START",
@@ -411,7 +394,7 @@ class RecruitmentService:
                 select(AiEvaluation).where(AiEvaluation.application_id == app.id)
             ).scalar_one_or_none()
 
-            # Validar que todas las preguntas requeridas están respondidas
+            # Validar preguntas requeridas
             required_ids = db.execute(
                 select(VacancyQuestion.id).where(
                     VacancyQuestion.vacancy_id == app.vacancy_id,
@@ -421,24 +404,17 @@ class RecruitmentService:
             answered_ids = db.execute(
                 select(Answer.vacancy_question_id).where(Answer.application_id == app.id)
             ).scalars().all()
-            missing = set(required_ids) - set(answered_ids)
-
-            if missing:
+            if set(required_ids) - set(answered_ids):
                 app.status = ApplicationStatus.IN_PROGRESS
-                return [{"text": "Aún faltan respuestas obligatorias para completar la postulación."}]
+                return [{"text": "Faltan respuestas obligatorias para completar la postulación."}]
 
-            if not ai_eval:
-                app.status = ApplicationStatus.SCORING
-                return [{"text": "Procesando tu CV…"}]
-
-            if ai_eval.status == AiEvalStatus.PENDING:
+            if not ai_eval or ai_eval.status == AiEvalStatus.PENDING:
                 app.status = ApplicationStatus.SCORING
                 return [{"text": "Analizando tu CV, un momento…"}]
 
             if ai_eval.status == AiEvalStatus.FAILED:
                 return self._escalate_human(db, session, "Falló la evaluación IA del CV")
 
-            # Mapear respuestas por field_key
             answer_map: dict[str, Any] = {}
             for a in answers:
                 if a.answer_boolean is not None:
@@ -468,9 +444,6 @@ class RecruitmentService:
                     current = (ai_eval.parsed_json or {}).get(rule.field_key)
 
                 matched = compare_rule(current, rule)
-                log_event(db=db, level="DEBUG", source="scoring", event="RULE_EVAL",
-                          payload={"rule": rule.name, "matched": matched}, application_id=app.id)
-
                 if matched and rule.is_disqualifier:
                     is_disqualified = True
                     disqualification_reason = rule.name
@@ -487,38 +460,31 @@ class RecruitmentService:
             app.classification = classification
             app.is_disqualified = is_disqualified
             app.disqualification_reason = disqualification_reason
-
-            status_map = {
+            app.status = {
                 Classification.SHORTLIST: ApplicationStatus.SHORTLIST,
                 Classification.INTERVIEW: ApplicationStatus.INTERVIEW,
                 Classification.REVIEW: ApplicationStatus.REVIEW,
                 Classification.REJECT: ApplicationStatus.REJECTED,
-            }
-            app.status = status_map[classification]
+            }[classification]
 
             self._transition(session, ChatState.CONFIRM_AND_CLOSE)
-
             log_event(db=db, level="INFO", source="scoring", event="SCORING_COMPLETE",
                       payload={"score_total": float(total), "classification": classification.value},
                       application_id=app.id)
-
             self._notify_top_candidates(db, app.tenant_id, app.vacancy_id)
 
-            classification_labels = {
+            labels = {
                 Classification.SHORTLIST: "✅ Shortlist — muy buena candidatura",
                 Classification.INTERVIEW: "👍 Entrevista recomendada",
                 Classification.REVIEW: "🔍 En revisión por RRHH",
                 Classification.REJECT: "❌ No seleccionado en esta ocasión",
             }
-            return [{
-                "text": (
-                    f"Hemos procesado tu candidatura.\n"
-                    f"Resultado: {classification_labels.get(classification, classification.value)}\n\n"
-                    f"Puntuación total: {total:.1f}\n"
-                    f"Escribe /start para postular a otra vacante."
-                )
-            }]
-
+            return [{"text": (
+                f"Hemos procesado tu candidatura.\n"
+                f"Resultado: {labels[classification]}\n\n"
+                f"Puntuación total: {total:.1f}\n"
+                f"Escribe /start para postular a otra vacante."
+            )}]
         except Exception as e:
             log_event(db=db, level="ERROR", source="scoring", event="SCORING_EXCEPTION",
                       message=str(e), exc=e, application_id=app.id)
@@ -542,7 +508,6 @@ class RecruitmentService:
                 Application.score_total.desc(),
             )
         ).all()
-
         top = [
             {"nombre": r.full_name, "telefono": r.phone_e164,
              "score_total": float(r.score_total), "estado": r.classification.value}
@@ -557,7 +522,7 @@ class RecruitmentService:
         self._transition(session, ChatState.ESCALATE_HUMAN)
         return [{"text": f"Voy a derivar tu caso a RRHH. Motivo: {reason}"}]
 
-    # ─── CV Pipeline (async background task) ────────────────────────────────
+    # ── CV Pipeline async ─────────────────────────────────────────────────────
 
     def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
         with SessionLocal() as db:
@@ -575,18 +540,15 @@ class RecruitmentService:
                     )
                 ).scalar_one()
 
-                # Cargar bytes del CV
                 content = cv.content
                 if content is None:
                     with open(cv.storage_key, "rb") as fh:
                         content = fh.read()
 
-                # Extraer texto
                 text, parse_status = extract_cv_text(cv.extension, content)
                 cv.extracted_text = text
                 cv.parse_status = parse_status
 
-                # Crear/obtener registro de evaluación IA
                 ai_eval = db.execute(
                     select(AiEvaluation).where(AiEvaluation.cv_document_id == cv.id)
                 ).scalar_one_or_none()
@@ -601,7 +563,6 @@ class RecruitmentService:
                     db.add(ai_eval)
                     db.flush()
 
-                # Llamar al LLM
                 try:
                     payload, raw, latency_ms = self.llm.evaluate_cv(
                         {
@@ -625,11 +586,9 @@ class RecruitmentService:
                     ai_eval.status = AiEvalStatus.SUCCESS
                     ai_eval.attempts += 1
                     app.status = ApplicationStatus.SCORING
-
                     log_event(db=db, level="INFO", source="cv_pipeline", event="LLM_SUCCESS",
                               payload={"score": float(payload.cv_score_0_10), "latency_ms": latency_ms},
                               application_id=app.id)
-
                 except Exception as exc:
                     ai_eval.status = AiEvalStatus.FAILED
                     ai_eval.error_message = str(exc)
@@ -639,7 +598,6 @@ class RecruitmentService:
                     db.commit()
                     return
 
-                # Si el candidato ya terminó de responder preguntas, lanzar scoring
                 if session.current_state == ChatState.SCORING:
                     outgoing = self._apply_scoring(db, app, session)
                     db.commit()
@@ -653,9 +611,6 @@ class RecruitmentService:
                     return
 
                 db.commit()
-                log_event(db=db, level="INFO", source="cv_pipeline", event="PIPELINE_END",
-                          application_id=app.id)
-
             except Exception as e:
                 log_event(db=db, level="CRITICAL", source="cv_pipeline", event="PIPELINE_CRASH",
                           message=str(e), exc=e, tenant_id=tenant_id, application_id=application_id)

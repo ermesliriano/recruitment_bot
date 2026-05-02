@@ -7,14 +7,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.enums import AnswerType, ScoringOperator, SourceScope, VacancyStatus
+from app.enums import AnswerType, ScoringOperator, VacancyStatus
 
-
-# ─── Vacancy ──────────────────────────────────────────────────────────────────
 
 class VacancyBase(BaseModel):
-    code: str = Field(..., max_length=80)
-    title: str = Field(..., max_length=255)
+    title: str
     description: str
     responsibilities: list[str] = []
     mandatory_requirements: list[str] = []
@@ -24,14 +21,15 @@ class VacancyBase(BaseModel):
     location_text: str | None = None
     benefits: list[str] = []
     faq_context: dict[str, Any] = Field(default_factory=lambda: {"items": []})
-    cv_score_factor: Decimal = Decimal("6.00")
+    cv_score_factor: float = 6.0
     classification_thresholds: dict[str, Any] = Field(
         default_factory=lambda: {"review": 35, "interview": 60, "shortlist": 75}
     )
 
 
 class VacancyCreate(VacancyBase):
-    pass
+    code: str
+    tenant_id: UUID
 
 
 class VacancyUpdate(VacancyBase):
@@ -44,18 +42,16 @@ class VacancyStatusUpdate(BaseModel):
 
 class VacancyOut(VacancyBase):
     id: UUID
+    code: str
     tenant_id: UUID
     status: VacancyStatus
-    created_at: Any
-    updated_at: Any | None = None
 
     model_config = {"from_attributes": True}
 
 
-# ─── Question + ScoringRule (creación conjunta) ────────────────────────────────
+# ── Preguntas de vacante (creación conjunta) ────────────────────────────────
 
 class ScoringRuleInline(BaseModel):
-    """Regla de scoring que se crea junto con la pregunta de vacante."""
     name: str
     operator: ScoringOperator
     expected_text: str | None = None
@@ -67,22 +63,16 @@ class ScoringRuleInline(BaseModel):
 
 
 class VacancyQuestionCreate(BaseModel):
-    """Crea una Question (si es nueva) y la asocia a la vacante con su regla."""
-    # Datos de la pregunta
     question_code: str = Field(..., max_length=80)
     prompt_text: str
     answer_type: AnswerType
     default_validation: dict[str, Any] = {}
-
-    # Datos de la asociación
     field_key: str = Field(..., max_length=120)
     question_order: int = Field(..., ge=1)
     prompt_override: str | None = None
     validation: dict[str, Any] = {}
     required: bool = True
     scoring_enabled: bool = True
-
-    # Regla de scoring opcional
     scoring_rule: ScoringRuleInline | None = None
 
 

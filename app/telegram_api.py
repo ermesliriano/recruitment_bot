@@ -1,11 +1,9 @@
 # app/telegram_api.py
-from app.logger import log_event
-
-import httpx
-import json
 from dataclasses import dataclass
 from typing import Any
-from app.core import SessionLocal
+
+import httpx
+
 
 @dataclass
 class IncomingEvent:
@@ -17,6 +15,7 @@ class IncomingEvent:
     callback_query_id: str | None = None
     contact_phone: str | None = None
     document: dict[str, Any] | None = None
+
 
 def parse_telegram_update(payload: dict[str, Any]) -> IncomingEvent:
     update_id = payload.get("update_id", 0)
@@ -54,9 +53,7 @@ def parse_telegram_update(payload: dict[str, Any]) -> IncomingEvent:
             "file_size": photo.get("file_size", 0),
         }
 
-    contact_phone = None
-    if "contact" in msg:
-        contact_phone = msg["contact"].get("phone_number")
+    contact_phone = msg.get("contact", {}).get("phone_number") if "contact" in msg else None
 
     return IncomingEvent(
         update_id=update_id,
@@ -67,15 +64,16 @@ def parse_telegram_update(payload: dict[str, Any]) -> IncomingEvent:
         document=doc,
     )
 
+
 class TelegramGateway:
-    def __init__(self, bot_token: str):
-        self.base = f"https://api.telegram.org/bot{bot_token}"
-        self.file_base = f"https://api.telegram.org/file/bot{bot_token}"
-        self.client = httpx.Client(timeout=60)
+    def __init__(self, bot_token: str) -> None:
+        self._base = f"https://api.telegram.org/bot{bot_token}"
+        self._file_base = f"https://api.telegram.org/file/bot{bot_token}"
+        self._client = httpx.Client(timeout=60)
 
     def set_webhook(self, url: str, secret_token: str) -> dict[str, Any]:
-        resp = self.client.post(
-            f"{self.base}/setWebhook",
+        resp = self._client.post(
+            f"{self._base}/setWebhook",
             json={
                 "url": url,
                 "secret_token": secret_token,
@@ -86,28 +84,30 @@ class TelegramGateway:
         resp.raise_for_status()
         return resp.json()
 
-    def send_message(self, chat_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = {"chat_id": chat_id, "text": text}
+    def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None) -> dict:
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        resp = self.client.post(f"{self.base}/sendMessage", json=payload)
+        resp = self._client.post(f"{self._base}/sendMessage", json=payload)
         resp.raise_for_status()
         return resp.json()
 
     def answer_callback_query(self, callback_query_id: str) -> None:
-        self.client.post(f"{self.base}/answerCallbackQuery", json={"callback_query_id": callback_query_id})
+        self._client.post(
+            f"{self._base}/answerCallbackQuery",
+            json={"callback_query_id": callback_query_id},
+        )
 
     def get_file_bytes(self, file_id: str) -> tuple[bytes, dict[str, Any]]:
-        meta = self.client.post(f"{self.base}/getFile", json={"file_id": file_id})
+        meta = self._client.post(f"{self._base}/getFile", json={"file_id": file_id})
         meta.raise_for_status()
         file_obj = meta.json()["result"]
-        file_path = file_obj["file_path"]
-        file_resp = self.client.get(f"{self.file_base}/{file_path}")
-        file_resp.raise_for_status()
-        return file_resp.content, file_obj
+        resp = self._client.get(f"{self._file_base}/{file_obj['file_path']}")
+        resp.raise_for_status()
+        return resp.content, file_obj
 
     @staticmethod
-    def phone_keyboard() -> dict[str, Any]:
+    def phone_keyboard() -> dict:
         return {
             "keyboard": [[{"text": "Compartir teléfono", "request_contact": True}]],
             "resize_keyboard": True,
@@ -115,16 +115,16 @@ class TelegramGateway:
         }
 
     @staticmethod
-    def vacancy_keyboard(vacancies: list[tuple[str, str]]) -> dict[str, Any]:
+    def vacancy_keyboard(vacancies: list[tuple[str, str]]) -> dict:
         return {
             "inline_keyboard": [
-                [{"text": title, "callback_data": f"vac:{vacancy_id}"}]
-                for vacancy_id, title in vacancies
+                [{"text": title, "callback_data": f"vac:{vid}"}]
+                for vid, title in vacancies
             ]
         }
 
     @staticmethod
-    def qa_keyboard() -> dict[str, Any]:
+    def qa_keyboard() -> dict:
         return {
             "inline_keyboard": [
                 [{"text": "Continuar", "callback_data": "go:continue"}],

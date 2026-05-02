@@ -1,17 +1,14 @@
-# app/services/scoring.py
+# app/services/scoring.py  (antes scoring_service)
 """
-Lógica pura de scoring: comparación de reglas y clasificación de candidatos.
+Lógica pura de scoring: comparación de reglas y clasificación.
 Sin dependencias de red ni de estado conversacional.
 """
 from __future__ import annotations
 
-import logging
 from decimal import Decimal
 from typing import Any
 
-from app.enums import Classification, ScoringOperator, VacancyStatus
-
-logger = logging.getLogger("recruitment.scoring")
+from app.enums import Classification, ScoringOperator
 
 
 def norm(value: Any) -> str:
@@ -21,7 +18,6 @@ def norm(value: Any) -> str:
 
 
 def compare_rule(current_value: Any, rule) -> bool:
-    """Evalúa si un valor cumple una regla de scoring."""
     if rule.operator == ScoringOperator.EQUALS:
         if rule.expected_boolean is not None:
             return current_value is rule.expected_boolean
@@ -46,7 +42,6 @@ def classify_candidate(
     score_cv: Decimal,
     is_disqualified: bool,
 ) -> tuple[Classification, Decimal]:
-    """Clasifica un candidato y devuelve (clasificación, puntuación total)."""
     if is_disqualified:
         return Classification.REJECT, Decimal("0")
 
@@ -66,7 +61,6 @@ def classify_candidate(
 def validate_answer(
     qtype: str, validation: dict[str, Any], raw: str
 ) -> tuple[str | None, Decimal | None, bool | None]:
-    """Valida y tipifica la respuesta del candidato. Lanza ValueError si inválida."""
     raw = raw.strip()
 
     if qtype == "text":

@@ -11,4 +11,7 @@ pdf2image
 pillow
 pytesseract
 python-multipart
-requests
+aiofiles
+pytest
+pytest-asyncio
+httpx
