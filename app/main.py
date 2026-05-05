@@ -19,10 +19,10 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(webhook.router)
-app.include_router(admin.router)
 app.include_router(internal.router)
-app.include_router(vacancies.router)
 app.include_router(questions.router)
+app.include_router(vacancies.router, prefix="/vacancies", tags=["vacancies"])
+app.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

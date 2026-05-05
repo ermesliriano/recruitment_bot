@@ -15,7 +15,7 @@ from app.schemas.vacancy import (
 )
 from app.services.vacancy_service import VacancyService
 
-router = APIRouter(prefix="/vacancies", tags=["Vacancies"])
+router = APIRouter(tags=["Vacancies"])
 
 
 @router.get("/", response_model=List[VacancyOut])
