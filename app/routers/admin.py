@@ -12,7 +12,7 @@ from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
 
-router = APIRouter(prefix="/admin/v1", tags=["Admin"], dependencies=[Depends(require_admin_token)])
+router = APIRouter(prefix="/v1", tags=["Admin"], dependencies=[Depends(require_admin_token)])
 
 
 @router.get("/tenants/{tenant_id}/vacancies/{vacancy_id}/ranking")
