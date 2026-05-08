@@ -25,7 +25,11 @@ ALLOWED_EXT = {".pdf", ".jpg", ".jpeg", ".png"}
 
 
 def normalize_phone(raw: str) -> str:
-    parsed = phonenumbers.parse(raw, settings.default_phone_region)
+    # Telegram sends phone_number without '+' but always includes the country code.
+    # Prepending '+' lets phonenumbers parse any country correctly,
+    # regardless of settings.default_phone_region (which would break non-ES numbers).
+    e164_input = raw if raw.startswith("+") else f"+{raw}"
+    parsed = phonenumbers.parse(e164_input, None)
     if not phonenumbers.is_valid_number(parsed):
         raise ValueError("Teléfono inválido")
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)

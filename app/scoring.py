@@ -224,7 +224,7 @@ class RecruitmentService:
 
         vacancy_id = event.callback_data.split(":", 1)[1]
         vacancy = db.execute(
-            select(Vacancy).where(Vacancy.id == vacancy_id, Vacancy.tenant_id == tenant.id, Vacancy.status == "active")
+            select(Vacancy).where(Vacancy.id == vacancy_id, Vacancy.tenant_id == tenant.id, Vacancy.status == "ACTIVE")
         ).scalar_one_or_none()
         if not vacancy:
             return self._invalid(session, "La vacante ya no está disponible.")
