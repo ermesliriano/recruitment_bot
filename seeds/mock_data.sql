@@ -17,7 +17,7 @@ INSERT INTO vacancies (
   id, tenant_id, code, title, description, responsibilities,
   mandatory_requirements, desirable_requirements,
   salary_text, schedule_text, location_text, benefits,
-  faq_context, cv_score_factor, classification_thresholds, status
+  faq_context, cv_max_score, classification_thresholds, status
 ) VALUES (
   '22222222-2222-2222-2222-222222222222',
   '11111111-1111-1111-1111-111111111111',
@@ -38,7 +38,7 @@ INSERT INTO vacancies (
       {"question":"¿Cuál es el salario?", "answer":"La banda objetivo es 40k-55k EUR.", "keywords":["salario","sueldo","pago"]}
     ]
   }'::jsonb,
-  6.00,
+  40,
   '{"review":35,"interview":60,"shortlist":75}'::jsonb,
   'ACTIVE'
 );
@@ -51,20 +51,20 @@ INSERT INTO questions (id, tenant_id, code, prompt_text, answer_type, default_va
 ('30000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', 'oncall_available', '¿Puedes entrar en guardias puntuales?', 'BOOLEAN', '{"true_values":["si","sí"],"false_values":["no"]}'::jsonb);
 
 INSERT INTO vacancy_questions (
-  id, tenant_id, vacancy_id, question_id, question_order, field_key, validation, required, scoring_enabled
+  id, tenant_id, vacancy_id, question_id, question_order, field_key, validation, required, scoring_enabled, max_points
 ) VALUES
-('40000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000001', 1, 'work_permit', '{}'::jsonb, true, true),
-('40000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000002', 2, 'years_fastapi', '{}'::jsonb, true, true),
-('40000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000003', 3, 'years_postgres', '{}'::jsonb, true, true),
-('40000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000004', 4, 'english_level', '{}'::jsonb, true, true),
-('40000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000005', 5, 'oncall_available', '{}'::jsonb, true, true);
+('40000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000001', 1, 'work_permit', '{}'::jsonb, true, true, 0),
+('40000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000002', 2, 'years_fastapi', '{}'::jsonb, true, true, 25),
+('40000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000003', 3, 'years_postgres', '{}'::jsonb, true, true, 20),
+('40000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000004', 4, 'english_level', '{}'::jsonb, true, true, 10),
+('40000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '30000000-0000-0000-0000-000000000005', 5, 'oncall_available', '{}'::jsonb, true, true, 5);
 
 INSERT INTO scoring_rules (
   id, tenant_id, vacancy_id, name, source_scope, field_key, operator,
   expected_text, expected_number, expected_boolean, points, is_disqualifier, priority
 ) VALUES
 ('50000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Sin permiso de trabajo', 'ANSWER', 'work_permit', 'EQUALS', NULL, NULL, false, 0, true, 1),
-('50000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'FastAPI 2+ años', 'ANSWER', 'years_fastapi', 'GTE', NULL, 2, NULL, 8, false, 10),
-('50000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'PostgreSQL 2+ años', 'ANSWER', 'years_postgres', 'GTE', NULL, 2, NULL, 6, false, 20),
-('50000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Inglés B2', 'ANSWER', 'english_level', 'CONTAINS', 'b2', NULL, NULL, 3, false, 30),
-('50000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Disponible para guardias', 'ANSWER', 'oncall_available', 'EQUALS', NULL, NULL, true, 2, false, 40);
+('50000000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'FastAPI 2+ años', 'ANSWER', 'years_fastapi', 'GTE', NULL, 2, NULL, 25, false, 10),
+('50000000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'PostgreSQL 2+ años', 'ANSWER', 'years_postgres', 'GTE', NULL, 2, NULL, 20, false, 20),
+('50000000-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Inglés B2', 'ANSWER', 'english_level', 'CONTAINS', 'b2', NULL, NULL, 10, false, 30),
+('50000000-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'Disponible para guardias', 'ANSWER', 'oncall_available', 'EQUALS', NULL, NULL, true, 5, false, 40);

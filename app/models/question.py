@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum as SAEnum, String, Text, text
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -40,5 +40,6 @@ class VacancyQuestion(Base):
     validation: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     required: Mapped[bool] = mapped_column(Boolean, default=True)
     scoring_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_points: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())

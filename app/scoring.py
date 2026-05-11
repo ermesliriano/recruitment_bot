@@ -397,21 +397,23 @@ class RecruitmentService:
 
         return False
 
-    def classify_candidate(self, vacancy: Vacancy, score_rules: Decimal, score_cv: Decimal, is_disqualified: bool) -> tuple[Classification, Decimal]:
+    def classify_candidate(self, vacancy: Vacancy, score_rules: Decimal, score_cv_raw: Decimal, is_disqualified: bool) -> tuple[Classification, Decimal, Decimal]:
+        """Devuelve (classification, score_total, score_cv_normalizado)."""
         if is_disqualified:
-            return Classification.REJECT, Decimal("0")
+            return Classification.REJECT, Decimal("0"), Decimal("0")
 
-        factor = Decimal(str(vacancy.cv_score_factor))
-        total = score_rules + (score_cv * factor)
+        cv_max = Decimal(str(vacancy.cv_max_score))
+        score_cv_normalized = (score_cv_raw / Decimal("10")) * cv_max
+        total = score_rules + score_cv_normalized
         thresholds = vacancy.classification_thresholds or {"review": 35, "interview": 60, "shortlist": 75}
 
         if total >= Decimal(str(thresholds["shortlist"])):
-            return Classification.SHORTLIST, total
+            return Classification.SHORTLIST, total, score_cv_normalized
         if total >= Decimal(str(thresholds["interview"])):
-            return Classification.INTERVIEW, total
+            return Classification.INTERVIEW, total, score_cv_normalized
         if total >= Decimal(str(thresholds["review"])):
-            return Classification.REVIEW, total
-        return Classification.REJECT, total
+            return Classification.REVIEW, total, score_cv_normalized
+        return Classification.REJECT, total, score_cv_normalized
 
     def apply_scoring(self, db, app: Application, session: ConversationSession):
 
@@ -599,17 +601,17 @@ class RecruitmentService:
             # =========================
             # SCORE FINAL
             # =========================
-            score_cv = Decimal(str(ai_eval.cv_score_0_10 or 0))
+            score_cv_raw = Decimal(str(ai_eval.cv_score_0_10 or 0))
 
-            classification, total = self.classify_candidate(
+            classification, total, score_cv_normalized = self.classify_candidate(
                 vacancy,
                 score_rules,
-                score_cv,
+                score_cv_raw,
                 is_disqualified
             )
 
             app.score_rules = score_rules
-            app.score_cv = score_cv
+            app.score_cv = score_cv_normalized
             app.score_total = total
             app.classification = classification
             app.is_disqualified = is_disqualified
@@ -649,7 +651,7 @@ class RecruitmentService:
                 "text": (
                     f"Tu postulación quedó registrada.\n"
                     f"score_rules={score_rules}\n"
-                    f"score_cv={score_cv}\n"
+                    f"score_cv={score_cv_normalized}\n"
                     f"score_total={total}\n"
                     f"estado={classification.value}"
                 )

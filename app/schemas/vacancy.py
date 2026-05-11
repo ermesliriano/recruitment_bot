@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.enums import AnswerType, ScoringOperator, VacancyStatus
 
@@ -21,7 +21,7 @@ class VacancyBase(BaseModel):
     location_text: str | None = None
     benefits: list[str] = []
     faq_context: dict[str, Any] = Field(default_factory=lambda: {"items": []})
-    cv_score_factor: float = 6.0
+    cv_max_score: int = Field(default=40, ge=1, le=99)
     classification_thresholds: dict[str, Any] = Field(
         default_factory=lambda: {"review": 35, "interview": 60, "shortlist": 75}
     )
@@ -73,6 +73,7 @@ class VacancyQuestionCreate(BaseModel):
     validation: dict[str, Any] = {}
     required: bool = True
     scoring_enabled: bool = True
+    max_points: int = Field(default=0, ge=0, le=100)
     scoring_rule: ScoringRuleInline | None = None
 
 
@@ -85,6 +86,7 @@ class VacancyQuestionOut(BaseModel):
     answer_type: AnswerType
     required: bool
     scoring_enabled: bool
+    max_points: int
     scoring_rule: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}

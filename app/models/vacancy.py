@@ -4,7 +4,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ARRAY, DateTime, Enum as SAEnum, Numeric, String, Text, text
+from sqlalchemy import ARRAY, DateTime, Enum as SAEnum, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -29,7 +29,7 @@ class Vacancy(Base):
     location_text: Mapped[str | None] = mapped_column(Text)
     benefits: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
     faq_context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    cv_score_factor: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("6.00"))
+    cv_max_score: Mapped[int] = mapped_column(Integer, default=40)
     classification_thresholds: Mapped[dict[str, Any]] = mapped_column(
         JSONB, default=lambda: {"review": 35, "interview": 60, "shortlist": 75}
     )

@@ -74,4 +74,7 @@ def add_vacancy_question(
     data: VacancyQuestionCreate,
     db: Session = Depends(get_db),
 ):
-    return VacancyService(db).add_question(vacancy_id, tenant_id, data)
+    try:
+        return VacancyService(db).add_question(vacancy_id, tenant_id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

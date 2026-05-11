@@ -11,6 +11,7 @@ from app.models.vacancy import Vacancy
 from app.models.question import Question, VacancyQuestion
 from app.models.scoring_rule import ScoringRule
 from app.schemas.vacancy import VacancyCreate, VacancyQuestionCreate, VacancyUpdate
+from app.services.scoring import validate_scoring_budget
 
 
 class VacancyService:
@@ -48,7 +49,7 @@ class VacancyService:
             location_text=data.location_text,
             benefits=data.benefits,
             faq_context=data.faq_context or {"items": []},
-            cv_score_factor=data.cv_score_factor,
+            cv_max_score=data.cv_max_score,
             classification_thresholds=data.classification_thresholds or {},
             status=VacancyStatus.DRAFT,
         )
@@ -96,6 +97,7 @@ class VacancyService:
                 "answer_type": q.answer_type,
                 "required": vq.required,
                 "scoring_enabled": vq.scoring_enabled,
+                "max_points": vq.max_points,
             }
             for vq, q in rows
         ]
@@ -132,6 +134,7 @@ class VacancyService:
             validation=data.validation,
             required=data.required,
             scoring_enabled=data.scoring_enabled,
+            max_points=data.max_points,
         )
         self.db.add(vq)
         self.db.flush()
@@ -155,4 +158,12 @@ class VacancyService:
             self.db.add(rule)
 
         self.db.commit()
+
+        ok, total = validate_scoring_budget(self.db, vacancy_id)
+        if not ok:
+            raise ValueError(
+                f"El presupuesto de puntuación no suma 100 (actual: {total}). "
+                f"Ajusta cv_max_score y los max_points de las preguntas."
+            )
+
         return {"vq_id": str(vq.id), "question_id": str(question.id)}
