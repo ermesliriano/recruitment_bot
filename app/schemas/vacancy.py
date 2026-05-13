@@ -21,7 +21,7 @@ class VacancyBase(BaseModel):
     location_text: str | None = None
     benefits: list[str] = []
     faq_context: dict[str, Any] = Field(default_factory=lambda: {"items": []})
-    cv_max_score: int = Field(default=40, ge=1, le=99)
+    cv_max_score: int = Field(default=40, ge=1, le=100)
     classification_thresholds: dict[str, Any] = Field(
         default_factory=lambda: {"review": 35, "interview": 60, "shortlist": 75}
     )
