@@ -10,7 +10,7 @@ from app.enums import VacancyStatus
 from app.models.vacancy import Vacancy
 from app.models.question import Question, VacancyQuestion
 from app.models.scoring_rule import ScoringRule
-from app.schemas.vacancy import VacancyCreate, VacancyQuestionCreate, VacancyUpdate
+from app.schemas.vacancy import VacancyCreate, VacancyQuestionCreate, VacancyQuestionUpdate, VacancyUpdate
 from app.services.scoring import validate_scoring_budget
 
 
@@ -167,3 +167,32 @@ class VacancyService:
             )
 
         return {"vq_id": str(vq.id), "question_id": str(question.id)}
+
+    def update_question(self, vq_id: str, data: VacancyQuestionUpdate) -> dict:
+        vq = self.db.execute(
+            select(VacancyQuestion).where(VacancyQuestion.id == vq_id)
+        ).scalar_one_or_none()
+        if not vq:
+            raise ValueError(f"Pregunta {vq_id} no encontrada")
+
+        for field, value in data.model_dump(exclude_none=True).items():
+            setattr(vq, field, value)
+
+        self.db.commit()
+        self.db.refresh(vq)
+
+        q = self.db.execute(
+            select(Question).where(Question.id == vq.question_id)
+        ).scalar_one()
+
+        return {
+            "vq_id": str(vq.id),
+            "question_id": str(q.id),
+            "question_order": vq.question_order,
+            "field_key": vq.field_key,
+            "prompt_text": vq.prompt_override or q.prompt_text,
+            "answer_type": q.answer_type,
+            "required": vq.required,
+            "scoring_enabled": vq.scoring_enabled,
+            "max_points": vq.max_points,
+        }

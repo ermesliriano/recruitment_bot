@@ -10,6 +10,7 @@ from app.schemas.vacancy import (
     VacancyOut,
     VacancyQuestionCreate,
     VacancyQuestionOut,
+    VacancyQuestionUpdate,
     VacancyStatusUpdate,
     VacancyUpdate,
 )
@@ -78,3 +79,16 @@ def add_vacancy_question(
         return VacancyService(db).add_question(vacancy_id, tenant_id, data)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.patch("/{vacancy_id}/questions/{vq_id}", dependencies=[Depends(require_admin_token)])
+def update_vacancy_question(
+    vacancy_id: str,
+    vq_id: str,
+    data: VacancyQuestionUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return VacancyService(db).update_question(vq_id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

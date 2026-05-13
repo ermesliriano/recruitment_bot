@@ -62,6 +62,13 @@ class ScoringRuleInline(BaseModel):
     priority: int = 100
 
 
+class VacancyQuestionUpdate(BaseModel):
+    prompt_override: str | None = None
+    max_points: int | None = Field(default=None, ge=0, le=100)
+    question_order: int | None = Field(default=None, ge=1)
+    required: bool | None = None
+
+
 class VacancyQuestionCreate(BaseModel):
     question_code: str = Field(..., max_length=80)
     prompt_text: str
