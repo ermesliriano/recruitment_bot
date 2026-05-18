@@ -89,6 +89,6 @@ def update_vacancy_question(
     db: Session = Depends(get_db),
 ):
     try:
-        return VacancyService(db).update_question(vq_id, data)
+        return VacancyService(db).update_question(vacancy_id, vq_id, data)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

@@ -60,14 +60,22 @@ class VacancyService:
 
     def update_vacancy(self, vacancy_id: str, data: VacancyUpdate, tenant_id: str | None = None) -> Vacancy:
         vacancy = self.get_vacancy(vacancy_id, tenant_id)
+
+        next_cv_max_score = (
+            data.cv_max_score
+            if data.cv_max_score is not None
+            else vacancy.cv_max_score
+        )
+
+        validate_active_vacancy_budget(
+            self.db,
+            vacancy_id,
+            cv_max_score_override=next_cv_max_score,
+        )
+
         for field, value in data.model_dump(exclude_unset=True).items():
             setattr(vacancy, field, value)
-            
-        validate_active_vacancy_budget(
-            db,
-            vacancy_id,
-            cv_max_score_override=payload.cv_max_score,
-        )
+
         self.db.commit()
         self.db.refresh(vacancy)
         return vacancy
@@ -129,6 +137,12 @@ class VacancyService:
             self.db.add(question)
             self.db.flush()
 
+        validate_active_vacancy_budget(
+            self.db,
+            vacancy_id,
+            new_question_max_score=data.max_points,
+        )
+
         vq = VacancyQuestion(
             id=uuid4(),
             tenant_id=tenant_id,
@@ -162,11 +176,6 @@ class VacancyService:
                 priority=data.scoring_rule.priority,
             )
             self.db.add(rule)
-        validate_active_vacancy_budget(
-            db,
-            vacancy_id,
-            new_question_max_score=payload.max_points,
-        )
         self.db.commit()
 
         ok, total = validate_scoring_budget(self.db, vacancy_id)
@@ -178,20 +187,37 @@ class VacancyService:
 
         return {"vq_id": str(vq.id), "question_id": str(question.id)}
 
-    def update_question(self, vq_id: str, data: VacancyQuestionUpdate) -> dict:
+    def update_question(
+        self,
+        vacancy_id: str,
+        vq_id: str,
+        data: VacancyQuestionUpdate,
+    ) -> dict:
         vq = self.db.execute(
-            select(VacancyQuestion).where(VacancyQuestion.vq_id == vq_id)
+            select(VacancyQuestion).where(
+                VacancyQuestion.id == vq_id,
+                VacancyQuestion.vacancy_id == vacancy_id,
+            )
         ).scalar_one_or_none()
         if not vq:
             raise ValueError(f"Pregunta {vq_id} no encontrada")
 
+        next_max_points = (
+            data.max_points
+            if data.max_points is not None
+            else vq.max_points
+        )
+
+        validate_active_vacancy_budget(
+            self.db,
+            vacancy_id,
+            question_max_score_overrides={
+                str(vq.id): next_max_points,
+            },
+        )
+
         for field, value in data.model_dump(exclude_none=True).items():
             setattr(vq, field, value)
-        validate_active_vacancy_budget(
-            db,
-            vacancy_id,
-            new_question_max_score=payload.max_points,
-        )
         self.db.commit()
         self.db.refresh(vq)
 
