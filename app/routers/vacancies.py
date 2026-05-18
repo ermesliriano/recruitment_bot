@@ -92,3 +92,19 @@ def update_vacancy_question(
         return VacancyService(db).update_question(vacancy_id, vq_id, data)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete(
+    "/{vacancy_id}/questions/{vq_id}",
+    status_code=204,
+    dependencies=[Depends(require_admin_token)],
+)
+def delete_vacancy_question(
+    vacancy_id: str,
+    vq_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        VacancyService(db).delete_question(vacancy_id, vq_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

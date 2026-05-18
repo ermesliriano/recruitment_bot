@@ -42,6 +42,7 @@ def get_vacancy_budget(
     cv_max_score_override: int | None = None,
     question_max_score_overrides: dict[str, int] | None = None,
     new_question_max_score: int | None = None,
+    excluded_question_id: str | None = None,
 ) -> dict[str, int]:
     vacancy = (
         db.query(Vacancy)
@@ -65,7 +66,10 @@ def get_vacancy_budget(
 
     questions = (
         db.query(VacancyQuestion)
-        .filter(VacancyQuestion.vacancy_id == vacancy_id)
+        .filter(
+            VacancyQuestion.vacancy_id == vacancy_id,
+            VacancyQuestion.is_active.is_(True),
+        )
         .all()
     )
 
@@ -73,6 +77,9 @@ def get_vacancy_budget(
 
     for question in questions:
         qid = _question_id(question)
+
+        if excluded_question_id and qid == str(excluded_question_id):
+            continue
 
         if qid in question_max_score_overrides:
             questions_total += int(question_max_score_overrides[qid] or 0)
@@ -98,6 +105,7 @@ def validate_active_vacancy_budget(
     cv_max_score_override: int | None = None,
     question_max_score_overrides: dict[str, int] | None = None,
     new_question_max_score: int | None = None,
+    excluded_question_id: str | None = None,
 ) -> None:
     vacancy = (
         db.query(Vacancy)
@@ -120,6 +128,7 @@ def validate_active_vacancy_budget(
         cv_max_score_override=cv_max_score_override,
         question_max_score_overrides=question_max_score_overrides,
         new_question_max_score=new_question_max_score,
+        excluded_question_id=excluded_question_id,
     )
 
     if budget["total"] != 100:

@@ -39,3 +39,4 @@ class Vacancy(Base):
     )
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=True)

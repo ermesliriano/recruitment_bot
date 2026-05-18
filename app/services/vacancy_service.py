@@ -1,9 +1,10 @@
 # app/services/vacancy_service.py
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.enums import VacancyStatus
@@ -21,13 +22,13 @@ class VacancyService:
     # ── CRUD vacantes ──────────────────────────────────────────────────────
 
     def list_vacancies(self, tenant_id: str | None = None) -> list[Vacancy]:
-        stmt = select(Vacancy)
+        stmt = select(Vacancy).where(Vacancy.deleted_at.is_(None))
         if tenant_id:
             stmt = stmt.where(Vacancy.tenant_id == tenant_id)
         return self.db.execute(stmt).scalars().all()
 
     def get_vacancy(self, vacancy_id: str, tenant_id: str | None = None) -> Vacancy:
-        stmt = select(Vacancy).where(Vacancy.id == vacancy_id)
+        stmt = select(Vacancy).where(Vacancy.id == vacancy_id, Vacancy.deleted_at.is_(None))
         if tenant_id:
             stmt = stmt.where(Vacancy.tenant_id == tenant_id)
         vacancy = self.db.execute(stmt).scalar_one_or_none()
@@ -89,7 +90,17 @@ class VacancyService:
 
     def delete_vacancy(self, vacancy_id: str, tenant_id: str | None = None) -> None:
         vacancy = self.get_vacancy(vacancy_id, tenant_id)
-        self.db.delete(vacancy)
+        # Soft-delete: desactivar todas las preguntas asociadas y marcar la vacante.
+        # No se borra ningún registro físico para preservar el historial.
+        self.db.execute(
+            update(VacancyQuestion)
+            .where(
+                VacancyQuestion.vacancy_id == vacancy_id,
+                VacancyQuestion.is_active.is_(True),
+            )
+            .values(is_active=False)
+        )
+        vacancy.deleted_at = datetime.now(timezone.utc)
         self.db.commit()
 
     # ── Preguntas de vacante ───────────────────────────────────────────────
@@ -197,6 +208,7 @@ class VacancyService:
             select(VacancyQuestion).where(
                 VacancyQuestion.id == vq_id,
                 VacancyQuestion.vacancy_id == vacancy_id,
+                VacancyQuestion.is_active.is_(True),
             )
         ).scalar_one_or_none()
         if not vq:
@@ -236,3 +248,25 @@ class VacancyService:
             "scoring_enabled": vq.scoring_enabled,
             "max_points": vq.max_points,
         }
+
+    def delete_question(self, vacancy_id: str, vq_id: str) -> None:
+        vq = self.db.execute(
+            select(VacancyQuestion).where(
+                VacancyQuestion.id == vq_id,
+                VacancyQuestion.vacancy_id == vacancy_id,
+                VacancyQuestion.is_active.is_(True),
+            )
+        ).scalar_one_or_none()
+
+        if not vq:
+            raise ValueError(f"Pregunta {vq_id} no encontrada")
+
+        validate_active_vacancy_budget(
+            self.db,
+            vacancy_id,
+            excluded_question_id=str(vq.id),
+        )
+
+        # Soft-delete: se marca como inactiva, no se elimina el registro.
+        vq.is_active = False
+        self.db.commit()
