@@ -55,9 +55,19 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
     ChatState.SELECT_VACANCY: {ChatState.CAPTURE_NAME, ChatState.ESCALATE_HUMAN, ChatState.SELECT_VACANCY},
     ChatState.CAPTURE_NAME: {ChatState.VACANCY_QA_MODE, ChatState.ESCALATE_HUMAN, ChatState.CAPTURE_NAME},
     ChatState.VACANCY_QA_MODE: {ChatState.REQUEST_CV, ChatState.ESCALATE_HUMAN, ChatState.VACANCY_QA_MODE},
-    ChatState.REQUEST_CV: {ChatState.ASK_VACANCY_QUESTIONS, ChatState.ESCALATE_HUMAN, ChatState.REQUEST_CV},
+    ChatState.REQUEST_CV: {
+        ChatState.ASK_VACANCY_QUESTIONS,
+        ChatState.SCORING,
+        ChatState.ESCALATE_HUMAN,
+        ChatState.REQUEST_CV,
+    },
     ChatState.ASK_VACANCY_QUESTIONS: {ChatState.ASK_VACANCY_QUESTIONS, ChatState.SCORING, ChatState.ESCALATE_HUMAN},
-    ChatState.SCORING: {ChatState.CONFIRM_AND_CLOSE, ChatState.ESCALATE_HUMAN, ChatState.SCORING},
+    ChatState.SCORING: {
+        ChatState.ASK_VACANCY_QUESTIONS,
+        ChatState.CONFIRM_AND_CLOSE,
+        ChatState.ESCALATE_HUMAN,
+        ChatState.SCORING,
+    },
     ChatState.CONFIRM_AND_CLOSE: {ChatState.SELECT_VACANCY, ChatState.CONFIRM_AND_CLOSE},
     ChatState.ESCALATE_HUMAN: {ChatState.ESCALATE_HUMAN},
 }
@@ -314,11 +324,21 @@ class RecruitmentService:
         db.flush()
 
         app.status = ApplicationStatus.PENDING_AI
-        session.state_payload = {**session.state_payload, "question_index": 0, "cv_document_id": str(cv.id)}
-        self._transition(session, ChatState.ASK_VACANCY_QUESTIONS)
+        session.state_payload = {
+            **session.state_payload,
+            "question_index": 0,
+            "cv_document_id": str(cv.id),
+        }
+        self._transition(session, ChatState.SCORING)
 
         background_tasks.add_task(self.run_cv_pipeline_async, tenant.id, app.id, cv.id)
-        return self._ask_next_question(db, app, session)
+
+        return [{
+            "text": (
+                "Gracias. Estoy leyendo tu CV y comprobando si algunas preguntas "
+                "ya están respondidas en el documento. Te escribiré en breve."
+            )
+        }]
 
     def _get_ordered_questions(self, db, vacancy_id):
         return db.execute(
@@ -331,12 +351,41 @@ class RecruitmentService:
     def _ask_next_question(self, db, app, session):
         questions = self._get_ordered_questions(db, app.vacancy_id)
         idx = int(session.state_payload.get("question_index", 0))
-        if idx >= len(questions):
-            db.commit()
+
+        while idx < len(questions):
+            vq, q = questions[idx]
+
+            # Saltar si ya existe una respuesta válida (insertada por el LLM o por el candidato).
+            existing_answer = db.execute(
+                select(Answer).where(
+                    Answer.application_id == app.id,
+                    Answer.vacancy_question_id == vq.id,
+                    Answer.is_valid.is_(True),
+                )
+            ).scalar_one_or_none()
+
+            if existing_answer:
+                idx += 1
+                continue
+
+            # Pregunta pendiente: actualizar índice y devolver el texto al candidato.
+            session.state_payload = {
+                **session.state_payload,
+                "question_index": idx,
+            }
+            return [{"text": vq.prompt_override or q.prompt_text}]
+
+        # Todas las preguntas respondidas: pasar a scoring.
+        session.state_payload = {
+            **session.state_payload,
+            "question_index": idx,
+        }
+        db.commit()
+
+        if session.current_state != ChatState.SCORING:
             self._transition(session, ChatState.SCORING)
-            return self._apply_scoring(db, app, session)
-        vq, q = questions[idx]
-        return [{"text": vq.prompt_override or q.prompt_text}]
+
+        return self._apply_scoring(db, app, session)
 
     def _handle_ask_questions(self, db, tenant, session, event):
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
@@ -523,6 +572,116 @@ class RecruitmentService:
         return [{"text": f"Voy a derivar tu caso a RRHH. Motivo: {reason}"}]
 
     # ── CV Pipeline async ─────────────────────────────────────────────────────
+    def _questions_for_llm(self, db, vacancy_id) -> list[dict[str, Any]]:
+        rows = self._get_ordered_questions(db, vacancy_id)
+
+        result = []
+
+        for vq, q in rows:
+            result.append({
+                "vacancy_question_id": str(vq.id),
+                "field_key": vq.field_key,
+                "prompt_text": vq.prompt_override or q.prompt_text,
+                "answer_type": q.answer_type.value,
+                "required": vq.required,
+                "max_points": vq.max_points,
+                "validation": {
+                    **(q.default_validation or {}),
+                    **(vq.validation or {}),
+                },
+            })
+
+        return result
+
+
+    def _prefill_answers_from_cv(
+        self,
+        db,
+        tenant_id,
+        app: Application,
+        inferred_answers: list[Any],
+    ) -> int:
+        created_count = 0
+
+        if not inferred_answers:
+            return created_count
+
+        rows = self._get_ordered_questions(db, app.vacancy_id)
+
+        question_map = {
+            str(vq.id): (vq, q)
+            for vq, q in rows
+        }
+
+        for item in inferred_answers:
+            data = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+
+            if not data.get("is_answered_in_cv"):
+                continue
+
+            confidence = float(data.get("confidence") or 0)
+            if confidence < 0.75:
+                continue
+
+            vq_id = str(data.get("vacancy_question_id") or "").strip()
+            normalized_answer = str(data.get("normalized_answer") or "").strip()
+
+            if not vq_id or not normalized_answer:
+                continue
+
+            pair = question_map.get(vq_id)
+            if not pair:
+                continue
+
+            vq, q = pair
+
+            existing_answer = db.execute(
+                select(Answer).where(
+                    Answer.application_id == app.id,
+                    Answer.vacancy_question_id == vq.id,
+                )
+            ).scalar_one_or_none()
+
+            if existing_answer:
+                continue
+
+            merged_validation = {
+                **(q.default_validation or {}),
+                **(vq.validation or {}),
+            }
+
+            try:
+                answer_text, answer_number, answer_boolean = validate_answer(
+                    q.answer_type.value,
+                    merged_validation,
+                    normalized_answer,
+                )
+            except ValueError:
+                continue
+
+            answer = Answer(
+                tenant_id=tenant_id,
+                application_id=app.id,
+                vacancy_question_id=vq.id,
+                field_key=vq.field_key,
+                answer_text=answer_text,
+                answer_number=answer_number,
+                answer_boolean=answer_boolean,
+                raw_payload={
+                    "source": "llm_cv_prefill",
+                    "raw_text": normalized_answer,
+                    "evidence": data.get("evidence"),
+                    "confidence": confidence,
+                    "llm_payload": data,
+                },
+                is_valid=True,
+            )
+
+            db.add(answer)
+            created_count += 1
+
+        db.flush()
+        return created_count
 
     def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
         with SessionLocal() as db:
@@ -564,6 +723,8 @@ class RecruitmentService:
                     db.flush()
 
                 try:
+                    vacancy_questions_for_llm = self._questions_for_llm(db, vacancy.id)
+
                     payload, raw, latency_ms = self.llm.evaluate_cv(
                         {
                             "title": vacancy.title,
@@ -574,6 +735,7 @@ class RecruitmentService:
                             "schedule_text": vacancy.schedule_text,
                         },
                         text,
+                        vacancy_questions=vacancy_questions_for_llm,
                     )
                     ai_eval.raw_response = raw
                     ai_eval.parsed_json = payload.model_dump()
@@ -586,6 +748,21 @@ class RecruitmentService:
                     ai_eval.status = AiEvalStatus.SUCCESS
                     ai_eval.attempts += 1
                     app.status = ApplicationStatus.SCORING
+                    prefilled_count = self._prefill_answers_from_cv(
+                        db=db,
+                        tenant_id=tenant.id,
+                        app=app,
+                        inferred_answers=payload.answered_vacancy_questions,
+                    )
+
+                    log_event(
+                        db=db,
+                        level="INFO",
+                        source="cv_pipeline",
+                        event="CV_ANSWERS_PREFILLED",
+                        payload={"prefilled_count": prefilled_count},
+                        application_id=app.id,
+                    )
                     log_event(db=db, level="INFO", source="cv_pipeline", event="LLM_SUCCESS",
                               payload={"score": float(payload.cv_score_0_10), "latency_ms": latency_ms},
                               application_id=app.id)
@@ -599,15 +776,29 @@ class RecruitmentService:
                     return
 
                 if session.current_state == ChatState.SCORING:
-                    outgoing = self._apply_scoring(db, app, session)
+                    self._transition(session, ChatState.ASK_VACANCY_QUESTIONS)
+                    outgoing = self._ask_next_question(db, app, session)
+
                     db.commit()
+
                     gateway = TelegramGateway(tenant.telegram_bot_token)
                     for msg in outgoing:
                         try:
-                            gateway.send_message(session.platform_chat_id, msg["text"], msg.get("reply_markup"))
+                            gateway.send_message(
+                                session.platform_chat_id,
+                                msg["text"],
+                                msg.get("reply_markup"),
+                            )
                         except Exception as send_exc:
-                            log_event(db=db, level="ERROR", source="cv_pipeline", event="MSG_SEND_FAILED",
-                                      message=str(send_exc), application_id=app.id)
+                            log_event(
+                                db=db,
+                                level="ERROR",
+                                source="cv_pipeline",
+                                event="MSG_SEND_FAILED",
+                                message=str(send_exc),
+                                application_id=app.id,
+                            )
+
                     return
 
                 db.commit()

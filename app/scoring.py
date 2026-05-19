@@ -328,14 +328,40 @@ class RecruitmentService:
     def _ask_next_question(self, db, app, session):
         questions = self._get_ordered_questions(db, app.vacancy_id)
         idx = int(session.state_payload.get("question_index", 0))
-        if idx >= len(questions):
-            db.commit()
-            self.transition(session, ChatState.SCORING)
-            return self.apply_scoring(db, app, session)
 
-        vq, q = questions[idx]
-        prompt = vq.prompt_override or q.prompt_text
-        return [{"text": prompt}]
+        while idx < len(questions):
+            vq, q = questions[idx]
+
+            existing_answer = db.execute(
+                select(Answer).where(
+                    Answer.application_id == app.id,
+                    Answer.vacancy_question_id == vq.id,
+                    Answer.is_valid.is_(True),
+                )
+            ).scalar_one_or_none()
+
+            if existing_answer:
+                idx += 1
+                continue
+
+            session.state_payload = {
+                **session.state_payload,
+                "question_index": idx,
+            }
+
+            return [{"text": vq.prompt_override or q.prompt_text}]
+
+        session.state_payload = {
+            **session.state_payload,
+            "question_index": idx,
+        }
+
+        db.commit()
+
+        if session.current_state != ChatState.SCORING:
+            self._transition(session, ChatState.SCORING)
+
+        return self._apply_scoring(db, app, session)
 
     def ask_questions(self, db, tenant, session, event):
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
