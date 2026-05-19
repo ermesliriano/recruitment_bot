@@ -93,9 +93,10 @@ CREATE TABLE vacancy_questions (
   max_points INT NOT NULL DEFAULT 0,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (vacancy_id, question_order),
-  UNIQUE (vacancy_id, field_key)
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- Sin constraints UNIQUE globales en question_order ni field_key:
+  -- se usan índices únicos parciales WHERE is_active = true
+  -- (ver sql/migrations/001_partial_unique_indexes_vacancy_questions.sql)
 );
 
 CREATE TABLE scoring_rules (
@@ -239,6 +240,9 @@ CREATE INDEX idx_vacancies_faq_context_gin ON vacancies USING GIN (faq_context);
 
 CREATE INDEX idx_questions_tenant_active ON questions (tenant_id, is_active);
 CREATE INDEX idx_vacancy_questions_vacancy_order ON vacancy_questions (vacancy_id, question_order);
+-- Sustituido por índices únicos parciales (migración 001):
+CREATE UNIQUE INDEX uq_vq_active_order ON vacancy_questions (vacancy_id, question_order) WHERE is_active = true;
+CREATE UNIQUE INDEX uq_vq_active_field_key ON vacancy_questions (vacancy_id, field_key) WHERE is_active = true;
 CREATE INDEX idx_scoring_rules_vacancy_priority ON scoring_rules (vacancy_id, priority, is_active);
 
 CREATE INDEX idx_candidates_tenant_phone ON candidates (tenant_id, phone_e164);

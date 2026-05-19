@@ -4,7 +4,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from fastapi import HTTPException, status
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.enums import VacancyStatus
@@ -154,6 +156,31 @@ class VacancyService:
             new_question_max_score=data.max_points,
         )
 
+        # Verificar que no exista ya una pregunta activa con el mismo orden.
+        # Esto ocurre si el usuario reutiliza el número de orden de una pregunta
+        # previamente eliminada con soft-delete.
+        existing_order = self.db.execute(
+            select(VacancyQuestion).where(
+                VacancyQuestion.vacancy_id == vacancy_id,
+                VacancyQuestion.question_order == data.question_order,
+                VacancyQuestion.is_active.is_(True),
+            )
+        ).scalar_one_or_none()
+
+        if existing_order:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "DUPLICATED_ACTIVE_QUESTION_ORDER",
+                    "message": (
+                        f"Ya existe una pregunta activa con el orden {data.question_order}. "
+                        "Usa otro número o edita la pregunta existente."
+                    ),
+                    "field": "question_order",
+                    "value": data.question_order,
+                },
+            )
+
         vq = VacancyQuestion(
             id=uuid4(),
             tenant_id=tenant_id,
@@ -167,27 +194,42 @@ class VacancyService:
             scoring_enabled=data.scoring_enabled,
             max_points=data.max_points,
         )
-        self.db.add(vq)
-        self.db.flush()
+        try:
+            self.db.add(vq)
+            self.db.flush()
 
-        if data.scoring_rule:
-            rule = ScoringRule(
-                id=uuid4(),
-                tenant_id=tenant_id,
-                vacancy_id=vacancy_id,
-                name=data.scoring_rule.name,
-                source_scope="answer",
-                field_key=data.field_key,
-                operator=data.scoring_rule.operator,
-                expected_text=data.scoring_rule.expected_text,
-                expected_number=data.scoring_rule.expected_number,
-                expected_boolean=data.scoring_rule.expected_boolean,
-                points=data.scoring_rule.points,
-                is_disqualifier=data.scoring_rule.is_disqualifier,
-                priority=data.scoring_rule.priority,
-            )
-            self.db.add(rule)
-        self.db.commit()
+            if data.scoring_rule:
+                rule = ScoringRule(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    vacancy_id=vacancy_id,
+                    name=data.scoring_rule.name,
+                    source_scope="answer",
+                    field_key=data.field_key,
+                    operator=data.scoring_rule.operator,
+                    expected_text=data.scoring_rule.expected_text,
+                    expected_number=data.scoring_rule.expected_number,
+                    expected_boolean=data.scoring_rule.expected_boolean,
+                    points=data.scoring_rule.points,
+                    is_disqualifier=data.scoring_rule.is_disqualifier,
+                    priority=data.scoring_rule.priority,
+                )
+                self.db.add(rule)
+
+            self.db.commit()
+
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "QUESTION_ORDER_CONFLICT",
+                    "message": (
+                        "No se pudo crear la pregunta porque ya existe una pregunta activa "
+                        "con ese orden o campo para esta vacante."
+                    ),
+                },
+            ) from exc
 
         ok, total = validate_scoring_budget(self.db, vacancy_id)
         if not ok:
