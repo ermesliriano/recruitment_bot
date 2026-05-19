@@ -14,6 +14,7 @@ from app.models.vacancy import Vacancy
 from app.models.question import Question, VacancyQuestion
 from app.models.scoring_rule import ScoringRule
 from app.schemas.vacancy import VacancyCreate, VacancyQuestionCreate, VacancyQuestionUpdate, VacancyUpdate
+from app.services.question_generation_llm import generate_questions_from_requirements
 from app.services.scoring import validate_scoring_budget
 from app.services.vacancy_budget import validate_active_vacancy_budget
 
@@ -289,6 +290,139 @@ class VacancyService:
             "required": vq.required,
             "scoring_enabled": vq.scoring_enabled,
             "max_points": vq.max_points,
+        }
+
+    # ── Generación automática de preguntas desde requisitos obligatorios ─────────
+
+    def generate_questions_from_mandatory_requirements(
+        self,
+        vacancy_id: str,
+        tenant_id: str | None = None,
+    ) -> dict:
+        """
+        Llama al LLM para generar preguntas de screening a partir de los
+        `mandatory_requirements` de la vacante y las persiste como VacancyQuestion.
+
+        Reglas de negocio aplicadas en este método:
+        - La vacante debe existir y tener entre 1 y 10 requisitos obligatorios.
+        - Si ya existen preguntas activas, se rechaza la operación (409).
+        - Los puntos se redistribuyen automáticamente para respetar el presupuesto.
+        """
+        vacancy = self.get_vacancy(vacancy_id, tenant_id)
+
+        mandatory_requirements: list[str] = vacancy.mandatory_requirements or []
+
+        if not mandatory_requirements:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="La vacante no tiene requisitos obligatorios.",
+            )
+
+        if len(mandatory_requirements) > 10:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "TOO_MANY_MANDATORY_REQUIREMENTS",
+                    "message": (
+                        "La generación automática solo está disponible para "
+                        "vacantes con 10 requisitos obligatorios o menos."
+                    ),
+                    "count": len(mandatory_requirements),
+                },
+            )
+
+        existing_active_questions = (
+            self.db.execute(
+                select(VacancyQuestion).where(
+                    VacancyQuestion.vacancy_id == vacancy_id,
+                    VacancyQuestion.is_active.is_(True),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        if existing_active_questions:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "VACANCY_ALREADY_HAS_QUESTIONS",
+                    "message": (
+                        "La vacante ya tiene preguntas configuradas. "
+                        "Edita o elimina las preguntas existentes antes de generar nuevas."
+                    ),
+                },
+            )
+
+        # ── Llamada al LLM ───────────────────────────────────────────────────
+        generated_questions = generate_questions_from_requirements(
+            vacancy_title=vacancy.title,
+            vacancy_description=vacancy.description,
+            mandatory_requirements=mandatory_requirements,
+            cv_max_score=vacancy.cv_max_score,
+        )
+
+        # ── Persistencia ─────────────────────────────────────────────────────────
+        created_items: list[dict] = []
+
+        for generated in generated_questions:
+            # Reutiliza Question existente por code+tenant o crea una nueva.
+            question = self.db.execute(
+                select(Question).where(
+                    Question.code == generated.question_code,
+                    Question.tenant_id == vacancy.tenant_id,
+                )
+            ).scalar_one_or_none()
+
+            if not question:
+                question = Question(
+                    id=uuid4(),
+                    tenant_id=vacancy.tenant_id,
+                    code=generated.question_code,
+                    prompt_text=generated.prompt_text,
+                    answer_type=generated.answer_type,
+                    default_validation=generated.validation,
+                )
+                self.db.add(question)
+                self.db.flush()
+
+            vq = VacancyQuestion(
+                id=uuid4(),
+                tenant_id=vacancy.tenant_id,
+                vacancy_id=vacancy.id,
+                question_id=question.id,
+                question_order=generated.question_order,
+                field_key=generated.field_key,
+                prompt_override=None,
+                validation=generated.validation,
+                required=generated.required,
+                scoring_enabled=generated.scoring_enabled,
+                max_points=generated.max_points,
+            )
+            self.db.add(vq)
+            self.db.flush()
+
+            created_items.append(
+                {
+                    "vq_id": vq.id,
+                    "question_id": question.id,
+                    "question_order": vq.question_order,
+                    "field_key": vq.field_key,
+                    "prompt_text": question.prompt_text,
+                    "answer_type": question.answer_type,
+                    "required": vq.required,
+                    "scoring_enabled": vq.scoring_enabled,
+                    "max_points": vq.max_points,
+                    "scoring_rule": None,
+                }
+            )
+
+        self.db.commit()
+
+        return {
+            "vacancy_id": vacancy.id,
+            "created_count": len(created_items),
+            "questions": created_items,
         }
 
     def delete_question(self, vacancy_id: str, vq_id: str) -> None:

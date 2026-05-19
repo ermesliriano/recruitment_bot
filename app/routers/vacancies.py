@@ -6,6 +6,8 @@ from typing import List
 from app.core.db import get_db
 from app.core.security import require_admin_token
 from app.schemas.vacancy import (
+    GenerateQuestionsFromRequirementsRequest,
+    GeneratedVacancyQuestionsOut,
     VacancyCreate,
     VacancyOut,
     VacancyQuestionCreate,
@@ -108,3 +110,29 @@ def delete_vacancy_question(
         VacancyService(db).delete_question(vacancy_id, vq_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+# ── Generación automática de preguntas ──────────────────────────────────────────
+
+@router.post(
+    "/{vacancy_id}/questions/generate-from-requirements",
+    response_model=GeneratedVacancyQuestionsOut,
+    dependencies=[Depends(require_admin_token)],
+    summary="Generar preguntas automáticamente desde requisitos obligatorios",
+    description=(
+        "Llama al LLM configurado para generar preguntas de screening "
+        "a partir de los requisitos obligatorios de la vacante. "
+        "Solo disponible si la vacante tiene entre 1 y 10 requisitos obligatorios "
+        "y no tiene preguntas activas previas."
+    ),
+)
+def generate_questions_from_requirements(
+    vacancy_id: str,
+    data: GenerateQuestionsFromRequirementsRequest,
+    tenant_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return VacancyService(db).generate_questions_from_mandatory_requirements(
+        vacancy_id=vacancy_id,
+        tenant_id=tenant_id,
+    )

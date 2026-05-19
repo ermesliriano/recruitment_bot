@@ -97,3 +97,17 @@ class VacancyQuestionOut(BaseModel):
     scoring_rule: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
+
+
+# ── Generación automática de preguntas desde requisitos obligatorios ───────────
+
+class GenerateQuestionsFromRequirementsRequest(BaseModel):
+    """Body del endpoint POST /vacancies/{id}/questions/generate-from-requirements."""
+    force: bool = False
+
+
+class GeneratedVacancyQuestionsOut(BaseModel):
+    """Respuesta del endpoint de generación automática de preguntas."""
+    vacancy_id: UUID
+    created_count: int
+    questions: list[VacancyQuestionOut]
