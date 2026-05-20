@@ -36,7 +36,13 @@ from app.models import (
     Vacancy,
     VacancyQuestion,
 )
-from app.services.scoring import classify_candidate, compare_rule, norm, validate_answer
+from app.services.scoring import (
+    classify_candidate,
+    compare_rule,
+    norm,
+    score_answers_from_vacancy_questions,
+    validate_answer,
+)
 from app.cv_pipeline import (
     extract_cv_text,
     get_storage,
@@ -480,7 +486,13 @@ class RecruitmentService:
                 .order_by(ScoringRule.priority.asc())
             ).scalars().all()
 
-            score_rules = Decimal("0")
+            question_score = score_answers_from_vacancy_questions(
+                db=db,
+                app=app,
+                answers=answers,
+            )
+
+            rule_score = Decimal("0")
             is_disqualified = False
             disqualification_reason = None
 
@@ -493,12 +505,18 @@ class RecruitmentService:
                     current = (ai_eval.parsed_json or {}).get(rule.field_key)
 
                 matched = compare_rule(current, rule)
+
                 if matched and rule.is_disqualifier:
                     is_disqualified = True
                     disqualification_reason = rule.name
                     break
-                if matched:
-                    score_rules += Decimal(rule.points)
+
+                # Las reglas ANSWER no suman puntos: las preguntas ya puntúan
+                # por VacancyQuestion.max_points para evitar doble puntuación.
+                if matched and rule.source_scope != SourceScope.ANSWER:
+                    rule_score += Decimal(rule.points)
+
+            score_rules = question_score + rule_score
 
             score_cv_raw = Decimal(str(ai_eval.cv_score_0_10 or 0))
             classification, total, score_cv_normalized = classify_candidate(
@@ -506,6 +524,22 @@ class RecruitmentService:
                 score_rules,
                 score_cv_raw,
                 is_disqualified,
+            )
+
+            log_event(
+                db=db,
+                level="INFO",
+                source="scoring",
+                event="SCORING_BREAKDOWN",
+                payload={
+                    "question_score": float(question_score),
+                    "rule_score": float(rule_score),
+                    "score_rules": float(score_rules),
+                    "cv_score_raw": float(score_cv_raw),
+                    "cv_score_normalized": float(score_cv_normalized),
+                    "score_total": float(total),
+                },
+                application_id=app.id,
             )
 
             app.score_rules = score_rules

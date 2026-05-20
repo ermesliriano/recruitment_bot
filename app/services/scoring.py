@@ -114,3 +114,57 @@ def validate_scoring_budget(db: Session, vacancy_id: str) -> tuple[bool, int]:
     ).scalar()
     total = vacancy.cv_max_score + int(question_points)
     return total == 100, total
+
+
+def score_answers_from_vacancy_questions(
+    db: Session,
+    app: Any,
+    answers: list[Any],
+) -> Decimal:
+    """
+    Calcula la puntuación de respuestas usando VacancyQuestion.max_points.
+
+    Regla actual:
+    - boolean True  => max_points
+    - boolean False => 0
+    - number/text   => 0 por defecto (se puntuarán mediante scoring_rules si se desea)
+
+    Las preguntas booleanas funcionan como todo-o-nada.
+    """
+    from app.enums import AnswerType
+    from app.models.question import Question, VacancyQuestion
+
+    if not answers:
+        return Decimal("0")
+
+    answer_by_vq_id = {
+        str(answer.vacancy_question_id): answer
+        for answer in answers
+        if answer.is_valid
+    }
+
+    rows = db.execute(
+        select(VacancyQuestion, Question)
+        .join(Question, Question.id == VacancyQuestion.question_id)
+        .where(
+            VacancyQuestion.vacancy_id == app.vacancy_id,
+            VacancyQuestion.is_active.is_(True),
+        )
+    ).all()
+
+    score = Decimal("0")
+
+    for vq, question in rows:
+        answer = answer_by_vq_id.get(str(vq.id))
+
+        if not answer:
+            continue
+
+        if question.answer_type == AnswerType.BOOLEAN:
+            if answer.answer_boolean is True:
+                score += Decimal(str(vq.max_points or 0))
+            # False => 0 puntos (todo-o-nada)
+
+        # number y text no puntuan automáticamente; usan scoring_rules externas.
+
+    return score
