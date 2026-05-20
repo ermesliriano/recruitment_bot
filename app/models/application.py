@@ -25,7 +25,7 @@ class Application(Base):
         default=ApplicationStatus.DRAFT,
     )
     score_rules: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=Decimal("0"))
-    score_cv: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
+    score_cv: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     score_total: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
     classification: Mapped[Classification | None] = mapped_column(
         SAEnum(Classification, name="classification_enum", create_type=False)

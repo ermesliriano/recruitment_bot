@@ -500,11 +500,16 @@ class RecruitmentService:
                 if matched:
                     score_rules += Decimal(rule.points)
 
-            score_cv = Decimal(str(ai_eval.cv_score_0_10 or 0))
-            classification, total = classify_candidate(vacancy, score_rules, score_cv, is_disqualified)
+            score_cv_raw = Decimal(str(ai_eval.cv_score_0_10 or 0))
+            classification, total, score_cv_normalized = classify_candidate(
+                vacancy,
+                score_rules,
+                score_cv_raw,
+                is_disqualified,
+            )
 
             app.score_rules = score_rules
-            app.score_cv = score_cv
+            app.score_cv = score_cv_normalized
             app.score_total = total
             app.classification = classification
             app.is_disqualified = is_disqualified
