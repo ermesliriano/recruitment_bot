@@ -17,6 +17,7 @@ CREATE TYPE state_enum AS ENUM (
   'SELECT_VACANCY',
   'CAPTURE_NAME',
   'VACANCY_QA_MODE',
+  'ASK_TENANT_QUESTIONS',
   'REQUEST_CV',
   'ASK_VACANCY_QUESTIONS',
   'SCORING',
@@ -77,6 +78,22 @@ CREATE TABLE questions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE tenant_questions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  question_id UUID NOT NULL REFERENCES questions(id) ON DELETE RESTRICT,
+  question_order INT NOT NULL CHECK (question_order > 0),
+  field_key TEXT NOT NULL,
+  prompt_override TEXT,
+  validation JSONB NOT NULL DEFAULT '{}'::jsonb,
+  required BOOLEAN NOT NULL DEFAULT TRUE,
+  ask_before_cv BOOLEAN NOT NULL DEFAULT TRUE,
+  include_in_cv_score BOOLEAN NOT NULL DEFAULT TRUE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE vacancy_questions (
@@ -157,7 +174,8 @@ CREATE TABLE answers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-  vacancy_question_id UUID NOT NULL REFERENCES vacancy_questions(id) ON DELETE CASCADE,
+  vacancy_question_id UUID NULL REFERENCES vacancy_questions(id) ON DELETE CASCADE,
+  tenant_question_id UUID NULL REFERENCES tenant_questions(id) ON DELETE CASCADE,
   field_key TEXT NOT NULL,
   answer_text TEXT,
   answer_number NUMERIC(12,2),
@@ -166,7 +184,11 @@ CREATE TABLE answers (
   is_valid BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (application_id, vacancy_question_id)
+  CONSTRAINT ck_answers_exactly_one_question_ref CHECK (
+    (vacancy_question_id IS NOT NULL AND tenant_question_id IS NULL)
+    OR
+    (vacancy_question_id IS NULL AND tenant_question_id IS NOT NULL)
+  )
 );
 
 CREATE TABLE cv_documents (
@@ -239,6 +261,9 @@ CREATE INDEX idx_vacancies_tenant_status ON vacancies (tenant_id, status, opens_
 CREATE INDEX idx_vacancies_faq_context_gin ON vacancies USING GIN (faq_context);
 
 CREATE INDEX idx_questions_tenant_active ON questions (tenant_id, is_active);
+CREATE INDEX idx_tenant_questions_tenant_order ON tenant_questions (tenant_id, question_order);
+CREATE UNIQUE INDEX uq_tq_active_order ON tenant_questions (tenant_id, question_order) WHERE is_active = true;
+CREATE UNIQUE INDEX uq_tq_active_field_key ON tenant_questions (tenant_id, field_key) WHERE is_active = true;
 CREATE INDEX idx_vacancy_questions_vacancy_order ON vacancy_questions (vacancy_id, question_order);
 -- Sustituido por índices únicos parciales (migración 001):
 CREATE UNIQUE INDEX uq_vq_active_order ON vacancy_questions (vacancy_id, question_order) WHERE is_active = true;
@@ -253,6 +278,9 @@ CREATE INDEX idx_applications_vacancy_ranking ON applications (tenant_id, vacanc
 CREATE INDEX idx_applications_candidate ON applications (tenant_id, candidate_id);
 
 CREATE INDEX idx_answers_app_field_key ON answers (application_id, field_key);
+CREATE UNIQUE INDEX uq_answers_application_vacancy_question ON answers (application_id, vacancy_question_id) WHERE vacancy_question_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_answers_application_tenant_question ON answers (application_id, tenant_question_id) WHERE tenant_question_id IS NOT NULL;
+CREATE INDEX idx_answers_app_tenant_question ON answers (application_id, tenant_question_id);
 CREATE INDEX idx_cv_documents_application ON cv_documents (application_id, version DESC);
 CREATE INDEX idx_ai_evaluations_application ON ai_evaluations (application_id, status);
 

@@ -27,6 +27,23 @@ class Question(Base):
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TenantQuestion(Base):
+    __tablename__ = "tenant_questions"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
+    question_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), index=True)
+    question_order: Mapped[int] = mapped_column(Integer)
+    field_key: Mapped[str] = mapped_column(String(120))
+    prompt_override: Mapped[str | None] = mapped_column(Text)
+    validation: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    ask_before_cv: Mapped[bool] = mapped_column(Boolean, default=True)
+    include_in_cv_score: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class VacancyQuestion(Base):
     __tablename__ = "vacancy_questions"
 

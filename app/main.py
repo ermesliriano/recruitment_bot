@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.routers import admin, internal, questions, vacancies, webhook
+from app.routers import admin, internal, questions, tenant_questions, vacancies, webhook
 
 app = FastAPI(title="Recruitment SaaS", version="2.0.0")
 
@@ -21,6 +21,7 @@ app.add_middleware(
 app.include_router(webhook.router)
 app.include_router(internal.router)
 app.include_router(questions.router)
+app.include_router(tenant_questions.router)
 app.include_router(vacancies.router, prefix="/vacancies", tags=["vacancies"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 

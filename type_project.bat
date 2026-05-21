@@ -10,7 +10,7 @@ echo Directorio: %target_dir%
 echo ====================================================
 
 :: Usamos un formato de cabecera que no use caracteres especiales de redireccion
-for /r "%target_dir%" %%f in (*.py .env *.txt *.yaml Dockerfile *.sql) do (
+for /r "%target_dir%" %%f in (*.py .env *.txt *.yaml Dockerfile *.sql, *.js, *.jsx, *.css, *.html) do (
     if exist "%%f" (
         echo.
         echo [ FICHERO: %%f ]

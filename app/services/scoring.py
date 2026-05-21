@@ -140,7 +140,7 @@ def score_answers_from_vacancy_questions(
     answer_by_vq_id = {
         str(answer.vacancy_question_id): answer
         for answer in answers
-        if answer.is_valid
+        if answer.is_valid and answer.vacancy_question_id is not None
     }
 
     rows = db.execute(

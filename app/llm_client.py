@@ -54,6 +54,8 @@ Analiza el CV en relación con la vacante indicada.
 
 Además de evaluar el CV de forma general, debes revisar si el propio CV contiene información suficiente para responder cada una de las preguntas específicas asociadas a la vacante. Solo responde una pregunta si hay evidencia clara en el CV; si no la hay, márcala como no respondida.
 
+También recibirás, si existen, respuestas genéricas del candidato a preguntas globales del tenant. Debes incorporarlas al análisis general del perfil y hacer que influyan en cv_score_0_10.
+
 Devuelve EXCLUSIVAMENTE JSON válido con esta estructura exacta:
 
 {{
@@ -82,16 +84,21 @@ Reglas generales:
 - recommendation debe ser exactamente uno de: "muy_idoneo", "idoneo", "revisar" o "no_idoneo".
 - No añadas markdown, backticks ni texto fuera del JSON.
 
+Reglas sobre respuestas genéricas del candidato:
+- Considéralas declaraciones explícitas del candidato.
+- Úsalas para enriquecer candidate_profile, experience_summary, red_flags y cv_score_0_10.
+- Si alguna respuesta contradice el CV, prioriza la respuesta explícita del candidato y registra la inconsistencia en red_flags.
+- No las devuelvas dentro de answered_vacancy_questions.
+
 Reglas para answered_vacancy_questions:
 - Debes devolver UNA entrada por cada pregunta recibida en "Preguntas asociadas a la vacante".
 - is_answered_in_cv=true solo si el CV contiene evidencia clara y directa.
 - Si no hay evidencia suficiente, usa is_answered_in_cv=false, normalized_answer=null, evidence=null y confidence=0.
 - confidence debe estar entre 0 y 1.
-- Para answer_type="boolean", normalized_answer debe ser "sí" o "no" (sin tilde si no aplica, pero respeta el formato).
-- Para answer_type="number", normalized_answer debe ser únicamente un número en texto, por ejemplo "3", "5.5" o "10".
+- Para answer_type="boolean", normalized_answer debe ser "sí" o "no".
+- Para answer_type="number", normalized_answer debe ser únicamente un número en texto.
 - Para answer_type="text", normalized_answer debe ser una respuesta breve y literal al CV.
-- No inventes información que no esté explícitamente en el CV.
-- No respondas preguntas basándote en inferencias débiles o implícitas.
+- No inventes información.
 - La evidencia debe ser un fragmento breve o resumen del CV que justifique la respuesta.
 
 Vacante:
@@ -101,6 +108,9 @@ Vacante:
 - Requisitos deseables: {desirable}
 - Ubicación: {location}
 - Horario: {schedule}
+
+Respuestas genéricas del candidato:
+{tenant_screening_answers_json}
 
 Preguntas asociadas a la vacante:
 {vacancy_questions_json}
@@ -154,6 +164,7 @@ class LlmClient:
         vacancy: dict[str, Any],
         cv_text: str,
         vacancy_questions: list[dict[str, Any]] | None = None,
+        tenant_screening_answers: list[dict[str, Any]] | None = None,
     ) -> tuple[LlmEvaluationPayload, str, int]:
         if settings.llm_provider != "openai":
             raise RuntimeError(f"Proveedor LLM no soportado: {settings.llm_provider}")
@@ -165,6 +176,11 @@ class LlmClient:
             desirable=", ".join(vacancy.get("desirable_requirements", [])),
             location=vacancy.get("location_text") or "",
             schedule=vacancy.get("schedule_text") or "",
+            tenant_screening_answers_json=json.dumps(
+                tenant_screening_answers or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
             vacancy_questions_json=json.dumps(
                 vacancy_questions or [],
                 ensure_ascii=False,

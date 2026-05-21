@@ -33,6 +33,7 @@ from app.models import (
     Question,
     ScoringRule,
     Tenant,
+    TenantQuestion,
     Vacancy,
     VacancyQuestion,
 )
@@ -60,7 +61,17 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
     ChatState.WELCOME: {ChatState.SELECT_VACANCY, ChatState.ESCALATE_HUMAN, ChatState.WELCOME},
     ChatState.SELECT_VACANCY: {ChatState.CAPTURE_NAME, ChatState.ESCALATE_HUMAN, ChatState.SELECT_VACANCY},
     ChatState.CAPTURE_NAME: {ChatState.VACANCY_QA_MODE, ChatState.ESCALATE_HUMAN, ChatState.CAPTURE_NAME},
-    ChatState.VACANCY_QA_MODE: {ChatState.REQUEST_CV, ChatState.ESCALATE_HUMAN, ChatState.VACANCY_QA_MODE},
+    ChatState.VACANCY_QA_MODE: {
+        ChatState.VACANCY_QA_MODE,
+        ChatState.ASK_TENANT_QUESTIONS,
+        ChatState.REQUEST_CV,
+        ChatState.ESCALATE_HUMAN,
+    },
+    ChatState.ASK_TENANT_QUESTIONS: {
+        ChatState.ASK_TENANT_QUESTIONS,
+        ChatState.REQUEST_CV,
+        ChatState.ESCALATE_HUMAN,
+    },
     ChatState.REQUEST_CV: {
         ChatState.ASK_VACANCY_QUESTIONS,
         ChatState.SCORING,
@@ -162,6 +173,7 @@ class RecruitmentService:
             ChatState.SELECT_VACANCY: self._handle_select_vacancy,
             ChatState.CAPTURE_NAME: self._handle_capture_name,
             ChatState.VACANCY_QA_MODE: self._handle_vacancy_qa,
+            ChatState.ASK_TENANT_QUESTIONS: self._handle_ask_tenant_questions,
             ChatState.REQUEST_CV: self._handle_request_cv,
             ChatState.ASK_VACANCY_QUESTIONS: self._handle_ask_questions,
             ChatState.SCORING: lambda db, t, s, e: [{"text": "Estoy evaluando tu candidatura. Te escribiré en breve."}],
@@ -170,7 +182,7 @@ class RecruitmentService:
         handler = handlers.get(session.current_state)
         if handler:
             return handler(db, tenant, session, event, background_tasks) \
-                if session.current_state == ChatState.REQUEST_CV \
+                if session.current_state in {ChatState.REQUEST_CV} \
                 else handler(db, tenant, session, event)
 
         return [{"text": "Estado no soportado. Te derivo con RRHH."}]
@@ -277,6 +289,19 @@ class RecruitmentService:
         ).scalar_one()
 
         if event.callback_data == "go:continue":
+            tenant_questions = self._get_ordered_tenant_questions(db, tenant.id)
+
+            if tenant_questions:
+                session.state_payload = {
+                    **session.state_payload,
+                    "tenant_question_index": 0,
+                }
+                self._transition(session, ChatState.ASK_TENANT_QUESTIONS)
+                return [
+                    {"text": "Antes de enviarme tu CV necesito hacerte unas preguntas generales."},
+                    *self._ask_next_tenant_question(db, tenant, session),
+                ]
+
             self._transition(session, ChatState.REQUEST_CV)
             return [{"text": "Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
 
@@ -345,6 +370,146 @@ class RecruitmentService:
                 "ya están respondidas en el documento. Te escribiré en breve."
             )
         }]
+
+    # ── Métodos de preguntas genéricas de tenant ───────────────────────────
+
+    def _get_ordered_tenant_questions(self, db, tenant_id):
+        return db.execute(
+            select(TenantQuestion, Question)
+            .join(Question, Question.id == TenantQuestion.question_id)
+            .where(
+                TenantQuestion.tenant_id == tenant_id,
+                TenantQuestion.is_active.is_(True),
+                TenantQuestion.ask_before_cv.is_(True),
+            )
+            .order_by(TenantQuestion.question_order.asc())
+        ).all()
+
+    def _save_answer(
+        self,
+        db,
+        *,
+        tenant_id,
+        application_id,
+        field_key: str,
+        answer_text,
+        answer_number,
+        answer_boolean,
+        raw_payload: dict,
+        vacancy_question_id=None,
+        tenant_question_id=None,
+    ):
+        if bool(vacancy_question_id) == bool(tenant_question_id):
+            raise ValueError("Debe indicarse exactamente una referencia de pregunta.")
+
+        filters = [Answer.application_id == application_id]
+        if vacancy_question_id is not None:
+            filters.append(Answer.vacancy_question_id == vacancy_question_id)
+        else:
+            filters.append(Answer.tenant_question_id == tenant_question_id)
+
+        answer = db.execute(select(Answer).where(*filters)).scalar_one_or_none()
+
+        if not answer:
+            answer = Answer(
+                tenant_id=tenant_id,
+                application_id=application_id,
+                vacancy_question_id=vacancy_question_id,
+                tenant_question_id=tenant_question_id,
+                field_key=field_key,
+            )
+            db.add(answer)
+            db.flush()
+
+        answer.answer_text = answer_text
+        answer.answer_number = answer_number
+        answer.answer_boolean = answer_boolean
+        answer.raw_payload = raw_payload
+        answer.is_valid = True
+        return answer
+
+    def _ask_next_tenant_question(self, db, tenant, session):
+        app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
+        questions = self._get_ordered_tenant_questions(db, tenant.id)
+        idx = int(session.state_payload.get("tenant_question_index", 0))
+
+        while idx < len(questions):
+            tq, q = questions[idx]
+
+            existing_answer = db.execute(
+                select(Answer).where(
+                    Answer.application_id == app.id,
+                    Answer.tenant_question_id == tq.id,
+                    Answer.is_valid.is_(True),
+                )
+            ).scalar_one_or_none()
+
+            if existing_answer:
+                idx += 1
+                continue
+
+            session.state_payload = {
+                **session.state_payload,
+                "tenant_question_index": idx,
+            }
+            return [{"text": tq.prompt_override or q.prompt_text}]
+
+        session.state_payload = {
+            **session.state_payload,
+            "tenant_question_index": idx,
+        }
+
+        if session.current_state != ChatState.REQUEST_CV:
+            self._transition(session, ChatState.REQUEST_CV)
+
+        return [{"text": "Gracias. Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
+
+    def _handle_ask_tenant_questions(self, db, tenant, session, event):
+        app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
+        questions = self._get_ordered_tenant_questions(db, tenant.id)
+        idx = int(session.state_payload.get("tenant_question_index", 0))
+
+        if idx >= len(questions):
+            self._transition(session, ChatState.REQUEST_CV)
+            return [{"text": "Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
+
+        tq, q = questions[idx]
+
+        if not event.text:
+            return self._invalid(session, "Debes responder con texto.")
+
+        merged_validation = {**(q.default_validation or {}), **(tq.validation or {})}
+
+        try:
+            answer_text, answer_number, answer_boolean = validate_answer(
+                q.answer_type.value,
+                merged_validation,
+                event.text,
+            )
+        except ValueError as exc:
+            return self._invalid(session, str(exc))
+
+        self._save_answer(
+            db,
+            tenant_id=tenant.id,
+            application_id=app.id,
+            tenant_question_id=tq.id,
+            field_key=tq.field_key,
+            answer_text=answer_text,
+            answer_number=answer_number,
+            answer_boolean=answer_boolean,
+            raw_payload={"raw_text": event.text, "source": "candidate"},
+        )
+
+        session.state_payload = {
+            **session.state_payload,
+            "tenant_question_index": idx + 1,
+        }
+        session.invalid_input_count = 0
+
+        return self._ask_next_tenant_question(db, tenant, session)
+
+    # ── Preguntas de vacante ─────────────────────────────────────────────────
 
     def _get_ordered_questions(self, db, vacancy_id):
         return db.execute(
@@ -722,6 +887,40 @@ class RecruitmentService:
         db.flush()
         return created_count
 
+    def _tenant_answers_for_llm(self, db, app: Application) -> list[dict[str, Any]]:
+        rows = db.execute(
+            select(Answer, TenantQuestion, Question)
+            .join(TenantQuestion, TenantQuestion.id == Answer.tenant_question_id)
+            .join(Question, Question.id == TenantQuestion.question_id)
+            .where(
+                Answer.application_id == app.id,
+                Answer.tenant_question_id.is_not(None),
+                Answer.is_valid.is_(True),
+                TenantQuestion.is_active.is_(True),
+                TenantQuestion.include_in_cv_score.is_(True),
+            )
+            .order_by(TenantQuestion.question_order.asc())
+        ).all()
+
+        result: list[dict[str, Any]] = []
+        for answer, tq, q in rows:
+            if answer.answer_boolean is not None:
+                value = answer.answer_boolean
+            elif answer.answer_number is not None:
+                value = float(answer.answer_number)
+            else:
+                value = answer.answer_text or ""
+
+            result.append({
+                "tenant_question_id": str(tq.id),
+                "field_key": tq.field_key,
+                "prompt_text": tq.prompt_override or q.prompt_text,
+                "answer_type": q.answer_type.value,
+                "answer": value,
+            })
+
+        return result
+
     def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
         with SessionLocal() as db:
             log_event(db=db, level="INFO", source="cv_pipeline", event="PIPELINE_START",
@@ -763,6 +962,7 @@ class RecruitmentService:
 
                 try:
                     vacancy_questions_for_llm = self._questions_for_llm(db, vacancy.id)
+                    tenant_answers_for_llm = self._tenant_answers_for_llm(db, app)
 
                     payload, raw, latency_ms = self.llm.evaluate_cv(
                         {
@@ -775,6 +975,7 @@ class RecruitmentService:
                         },
                         text,
                         vacancy_questions=vacancy_questions_for_llm,
+                        tenant_screening_answers=tenant_answers_for_llm,
                     )
                     ai_eval.raw_response = raw
                     ai_eval.parsed_json = payload.model_dump()
