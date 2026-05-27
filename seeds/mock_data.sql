@@ -1,5 +1,6 @@
 -- seeds/mock_data.sql
 truncate table tenants, vacancies, questions, vacancy_questions, candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, scoring_rules, system_logs;
+truncate table candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, system_logs;
  
 INSERT INTO tenants (
   id, slug, name, hr_email, telegram_bot_token, telegram_webhook_secret, settings_json

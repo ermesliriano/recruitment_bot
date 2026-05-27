@@ -385,6 +385,69 @@ class RecruitmentService:
             .order_by(TenantQuestion.question_order.asc())
         ).all()
 
+    def _tenant_answer_map(self, db, application_id) -> dict[str, Any]:
+        """Devuelve un mapa field_key → valor con todas las respuestas genéricas ya dadas."""
+        answers = db.execute(
+            select(Answer).where(
+                Answer.application_id == application_id,
+                Answer.tenant_question_id.is_not(None),
+                Answer.is_valid.is_(True),
+            )
+        ).scalars().all()
+
+        result: dict[str, Any] = {}
+        for answer in answers:
+            if answer.answer_boolean is not None:
+                result[answer.field_key] = answer.answer_boolean
+            elif answer.answer_number is not None:
+                result[answer.field_key] = answer.answer_number
+            else:
+                result[answer.field_key] = answer.answer_text or ""
+        return result
+
+    @staticmethod
+    def _matches_display_condition(
+        condition: dict[str, Any] | None,
+        answers_by_field: dict[str, Any],
+    ) -> bool:
+        """Evalúa si la pregunta debe mostrarse según su display_condition.
+
+        Estructura de condition:
+          {
+            "depends_on_field_key": "trabaja_actualmente",
+            "operator": "equals" | "not_equals" | "exists" | "not_exists",
+            "value": true / false / "texto"
+          }
+
+        Si condition está vacía o ausente, la pregunta siempre se muestra.
+        """
+        if not condition:
+            return True
+
+        depends_on = condition.get("depends_on_field_key")
+        operator = condition.get("operator", "equals")
+        expected = condition.get("value")
+
+        if not depends_on:
+            return True
+
+        if depends_on not in answers_by_field:
+            # El campo del que depende aún no tiene respuesta: no mostrar.
+            return False
+
+        current = answers_by_field[depends_on]
+
+        if operator == "equals":
+            return current == expected
+        if operator == "not_equals":
+            return current != expected
+        if operator == "exists":
+            return current is not None and str(current).strip() != ""
+        if operator == "not_exists":
+            return current is None or str(current).strip() == ""
+
+        return False
+
     def _save_answer(
         self,
         db,
@@ -433,8 +496,15 @@ class RecruitmentService:
         questions = self._get_ordered_tenant_questions(db, tenant.id)
         idx = int(session.state_payload.get("tenant_question_index", 0))
 
+        answers_by_field = self._tenant_answer_map(db, app.id)
+
         while idx < len(questions):
             tq, q = questions[idx]
+
+            # Saltar si la condición de visualización no se cumple.
+            if not self._matches_display_condition(tq.display_condition, answers_by_field):
+                idx += 1
+                continue
 
             existing_answer = db.execute(
                 select(Answer).where(
@@ -614,7 +684,7 @@ class RecruitmentService:
                 select(AiEvaluation).where(AiEvaluation.application_id == app.id)
             ).scalar_one_or_none()
 
-            # Validar preguntas requeridas
+            # Validar preguntas de vacante requeridas
             required_ids = db.execute(
                 select(VacancyQuestion.id).where(
                     VacancyQuestion.vacancy_id == app.vacancy_id,
@@ -625,6 +695,30 @@ class RecruitmentService:
                 select(Answer.vacancy_question_id).where(Answer.application_id == app.id)
             ).scalars().all()
             if set(required_ids) - set(answered_ids):
+                app.status = ApplicationStatus.IN_PROGRESS
+                return [{"text": "Faltan respuestas obligatorias para completar la postulación."}]
+
+            # Validar preguntas genéricas obligatorias (solo las que se mostraron según su condición).
+            tenant_questions = self._get_ordered_tenant_questions(db, app.tenant_id)
+            answers_by_field = self._tenant_answer_map(db, app.id)
+            answered_tenant_ids = set(
+                db.execute(
+                    select(Answer.tenant_question_id).where(
+                        Answer.application_id == app.id,
+                        Answer.tenant_question_id.is_not(None),
+                        Answer.is_valid.is_(True),
+                    )
+                ).scalars().all()
+            )
+            required_tenant_ids = [
+                tq.id
+                for tq, q in tenant_questions
+                if tq.required
+                and tq.is_active
+                and tq.ask_before_cv
+                and self._matches_display_condition(tq.display_condition, answers_by_field)
+            ]
+            if set(required_tenant_ids) - answered_tenant_ids:
                 app.status = ApplicationStatus.IN_PROGRESS
                 return [{"text": "Faltan respuestas obligatorias para completar la postulación."}]
 

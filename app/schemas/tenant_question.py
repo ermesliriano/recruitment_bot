@@ -18,6 +18,7 @@ class TenantQuestionCreate(BaseModel):
     question_order: int = Field(..., ge=1)
     prompt_override: str | None = None
     validation: dict[str, Any] = Field(default_factory=dict)
+    display_condition: dict[str, Any] = Field(default_factory=dict)
     required: bool = True
     ask_before_cv: bool = True
     include_in_cv_score: bool = True
@@ -29,6 +30,7 @@ class TenantQuestionUpdate(BaseModel):
     required: bool | None = None
     ask_before_cv: bool | None = None
     include_in_cv_score: bool | None = None
+    display_condition: dict[str, Any] | None = None
 
 
 class TenantQuestionOut(BaseModel):
@@ -38,6 +40,7 @@ class TenantQuestionOut(BaseModel):
     field_key: str
     prompt_text: str
     answer_type: AnswerType
+    display_condition: dict[str, Any]
     required: bool
     ask_before_cv: bool
     include_in_cv_score: bool

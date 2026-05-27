@@ -88,6 +88,7 @@ CREATE TABLE tenant_questions (
   field_key TEXT NOT NULL,
   prompt_override TEXT,
   validation JSONB NOT NULL DEFAULT '{}'::jsonb,
+  display_condition JSONB NOT NULL DEFAULT '{}'::jsonb,
   required BOOLEAN NOT NULL DEFAULT TRUE,
   ask_before_cv BOOLEAN NOT NULL DEFAULT TRUE,
   include_in_cv_score BOOLEAN NOT NULL DEFAULT TRUE,

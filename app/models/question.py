@@ -37,6 +37,7 @@ class TenantQuestion(Base):
     field_key: Mapped[str] = mapped_column(String(120))
     prompt_override: Mapped[str | None] = mapped_column(Text)
     validation: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    display_condition: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     required: Mapped[bool] = mapped_column(Boolean, default=True)
     ask_before_cv: Mapped[bool] = mapped_column(Boolean, default=True)
     include_in_cv_score: Mapped[bool] = mapped_column(Boolean, default=True)
