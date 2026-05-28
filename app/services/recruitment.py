@@ -6,15 +6,20 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import case, select
 
+from app.channels.base import IncomingAttachment, IncomingMessageEvent, OutgoingMessage
+from app.channels.whatsapp_twilio import TwilioWhatsAppGateway
 from app.core.config import settings
 from app.core.db import SessionLocal
+from app.cv_pipeline import extract_cv_text, get_storage, next_cv_version, normalize_phone, sha256_bytes, validate_cv
 from app.enums import (
     AiEvalStatus,
+    ApplicationOrigin,
     ApplicationStatus,
     ChatState,
     Classification,
@@ -37,23 +42,8 @@ from app.models import (
     Vacancy,
     VacancyQuestion,
 )
-from app.services.scoring import (
-    classify_candidate,
-    compare_rule,
-    norm,
-    score_answers_from_vacancy_questions,
-    validate_answer,
-)
-from app.cv_pipeline import (
-    extract_cv_text,
-    get_storage,
-    next_cv_version,
-    normalize_phone,
-    sha256_bytes,
-    validate_cv,
-)
+from app.services.scoring import classify_candidate, compare_rule, norm, score_answers_from_vacancy_questions, validate_answer
 from app.llm_client import LlmClient
-from app.telegram_api import IncomingEvent, TelegramGateway
 
 logger = logging.getLogger("recruitment")
 
@@ -73,12 +63,21 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
         ChatState.ESCALATE_HUMAN,
     },
     ChatState.REQUEST_CV: {
+        ChatState.SCORING,
+        ChatState.REQUEST_CV,
+        ChatState.ESCALATE_HUMAN,
+    },
+    ChatState.WAITING_CANDIDATE_REPLY: {
+        ChatState.WAITING_CANDIDATE_REPLY,
         ChatState.ASK_VACANCY_QUESTIONS,
         ChatState.SCORING,
         ChatState.ESCALATE_HUMAN,
-        ChatState.REQUEST_CV,
     },
-    ChatState.ASK_VACANCY_QUESTIONS: {ChatState.ASK_VACANCY_QUESTIONS, ChatState.SCORING, ChatState.ESCALATE_HUMAN},
+    ChatState.ASK_VACANCY_QUESTIONS: {
+        ChatState.ASK_VACANCY_QUESTIONS,
+        ChatState.SCORING,
+        ChatState.ESCALATE_HUMAN,
+    },
     ChatState.SCORING: {
         ChatState.ASK_VACANCY_QUESTIONS,
         ChatState.CONFIRM_AND_CLOSE,
@@ -90,7 +89,7 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
 }
 
 
-def detect_human_request(event: IncomingEvent) -> bool:
+def detect_human_request(event: IncomingMessageEvent) -> bool:
     text = norm(event.text)
     return text in {"humano", "asesor", "rrhh", "reclutador", "agent", "human"} \
         or event.callback_data == "go:human"

@@ -19,6 +19,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(webhook.router)
+app.include_router(cv_imports.router)
 app.include_router(internal.router)
 app.include_router(questions.router)
 app.include_router(tenant_questions.router)

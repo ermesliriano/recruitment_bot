@@ -40,12 +40,20 @@ class ApplicationStatus(str, enum.Enum):
     IN_PROGRESS = "in_progress"
     PENDING_AI = "pending_ai"
     SCORING = "scoring"
+    WAITING_CANDIDATE_REPLY = "waiting_candidate_reply"
+    BLOCKED_NO_OPT_IN = "blocked_no_opt_in"
     REVIEW = "review"
     INTERVIEW = "interview"
     SHORTLIST = "shortlist"
     REJECTED = "rejected"
     NEEDS_HUMAN = "needs_human"
     CLOSED = "closed"
+
+
+class ApplicationOrigin(str, enum.Enum):
+    INBOUND_TELEGRAM = "inbound_telegram"
+    INBOUND_WHATSAPP = "inbound_whatsapp"
+    RECRUITER_UPLOAD = "recruiter_upload"
 
 
 class Classification(str, enum.Enum):
@@ -62,6 +70,7 @@ class ChatState(str, enum.Enum):
     VACANCY_QA_MODE = "VACANCY_QA_MODE"
     ASK_TENANT_QUESTIONS = "ASK_TENANT_QUESTIONS"
     REQUEST_CV = "REQUEST_CV"
+    WAITING_CANDIDATE_REPLY = "WAITING_CANDIDATE_REPLY"
     ASK_VACANCY_QUESTIONS = "ASK_VACANCY_QUESTIONS"
     SCORING = "SCORING"
     CONFIRM_AND_CLOSE = "CONFIRM_AND_CLOSE"

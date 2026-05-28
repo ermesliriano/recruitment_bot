@@ -1,18 +1,17 @@
 # app/schemas/ranking.py
 from __future__ import annotations
 
-from decimal import Decimal
-from uuid import UUID
-
 from pydantic import BaseModel
-
-from app.enums import Classification
 
 
 class RankingRow(BaseModel):
+    application_id: str
     nombre: str | None
     telefono: str
     vacante: str
+    origin: str | None = None
+    channel: str | None = None
+    outbound_status: str | None = None
     score_rules: float
     score_cv: float | None
     score_total: float | None

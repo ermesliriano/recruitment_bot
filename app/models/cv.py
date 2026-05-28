@@ -4,13 +4,13 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Integer, Numeric, String, Text, text
+from sqlalchemy import DateTime, Enum as SAEnum, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import BYTEA, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.core.db import Base
-from app.enums import AiEvalStatus, CvParseStatus, StorageBackendType
+from app.enums import AiEvalStatus, CvParseStatus, Platform, StorageBackendType
 
 
 class CvDocument(Base):
@@ -25,8 +25,15 @@ class CvDocument(Base):
     extension: Mapped[str] = mapped_column(String(20))
     size_bytes: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
-    telegram_file_id: Mapped[str | None] = mapped_column(String(255))
-    telegram_file_unique_id: Mapped[str | None] = mapped_column(String(255))
+
+    source_platform: Mapped[Platform | None] = mapped_column(
+        SAEnum(Platform, name="platform_enum", create_type=False),
+        nullable=True,
+    )
+    source_file_id: Mapped[str | None] = mapped_column(String(255))
+    source_file_unique_id: Mapped[str | None] = mapped_column(String(255))
+    source_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
     storage_backend: Mapped[StorageBackendType] = mapped_column(
         SAEnum(StorageBackendType, name="storage_backend_enum", create_type=False)
     )

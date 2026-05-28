@@ -22,5 +22,13 @@ class Candidate(Base):
     location_text: Mapped[str | None] = mapped_column(String(255))
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
+
+    whatsapp_wa_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    whatsapp_from: Mapped[str | None] = mapped_column(String(128))
+    whatsapp_profile_name: Mapped[str | None] = mapped_column(String(255))
+    whatsapp_opt_in_status: Mapped[str] = mapped_column(String(40), default="unknown")
+    whatsapp_opt_in_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_inbound_whatsapp_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())

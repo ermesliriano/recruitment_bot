@@ -3,18 +3,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Base de datos
     database_url: str
 
-    # Seguridad
     admin_token: str = "change-me"
     allow_origins: str = "*"
+    public_base_url: str | None = None
 
-    # Telegram (por tenant; aquí valores por defecto opcionales)
     telegram_bot_token: str | None = None
     telegram_webhook_secret: str | None = None
 
-    # LLM
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_whatsapp_messaging_service_sid: str | None = None
+    twilio_whatsapp_from_address: str | None = None
+    twilio_whatsapp_default_template_sid: str | None = None
+    twilio_whatsapp_default_template_language: str = "es"
+    whatsapp_default_tenant_slug: str | None = None
+
     llm_provider: str = "openai"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
@@ -22,11 +27,9 @@ class Settings(BaseSettings):
     llm_max_retries: int = 3
     llm_cv_char_limit: int = 18_000
 
-    # Almacenamiento de CVs
-    storage_backend: str = "db_blob"   # db_blob | local_fs
+    storage_backend: str = "db_blob"
     storage_root: str = "./storage"
 
-    # Opciones de aplicación
     default_phone_region: str = "ES"
     top_n_notify: int = 5
 

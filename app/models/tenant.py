@@ -20,6 +20,15 @@ class Tenant(Base):
     hr_email: Mapped[str | None] = mapped_column(String(255))
     telegram_bot_token: Mapped[str | None] = mapped_column(Text)
     telegram_webhook_secret: Mapped[str | None] = mapped_column(Text)
+
+    whatsapp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    whatsapp_use_env_credentials: Mapped[bool] = mapped_column(Boolean, default=True)
+    whatsapp_messaging_service_sid: Mapped[str | None] = mapped_column(Text)
+    whatsapp_sender_address: Mapped[str | None] = mapped_column(Text)
+    whatsapp_initial_template_sid: Mapped[str | None] = mapped_column(Text)
+    whatsapp_initial_template_language: Mapped[str] = mapped_column(String(10), default="es")
+    whatsapp_assume_opt_in: Mapped[bool] = mapped_column(Boolean, default=False)
+
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())

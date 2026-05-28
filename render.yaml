@@ -20,6 +20,22 @@ services:
         value: ES
       - key: TOP_N_NOTIFY
         value: "5"
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_MESSAGING_SERVICE_SID
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM_ADDRESS
+        sync: false
+      - key: TWILIO_WHATSAPP_DEFAULT_TEMPLATE_SID
+        sync: false
+      - key: TWILIO_WHATSAPP_DEFAULT_TEMPLATE_LANGUAGE
+        value: es
+      - key: WHATSAPP_DEFAULT_TENANT_SLUG
+        sync: false
 
 databases:
   - name: recruitment-db
