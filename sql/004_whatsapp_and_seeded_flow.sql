@@ -42,11 +42,11 @@ END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'application_origin_enum') THEN
-        CREATE TYPE application_origin_enum AS ENUM (
-            'INBOUND_TELEGRAM',
-            'INBOUND_WHATSAPP',
-            'RECRUITER_UPLOAD'
-        );
+		CREATE TYPE application_origin_enum AS ENUM (
+			'inbound_telegram',
+			'inbound_whatsapp',
+			'recruiter_upload'
+		);
     END IF;
 END $$;
 
@@ -70,7 +70,7 @@ ALTER TABLE candidates
 CREATE INDEX IF NOT EXISTS idx_candidates_wa_id ON candidates (tenant_id, whatsapp_wa_id);
 
 ALTER TABLE applications
-    ADD COLUMN IF NOT EXISTS origin application_origin_enum NOT NULL DEFAULT 'INBOUND_TELEGRAM',
+    ADD COLUMN IF NOT EXISTS origin application_origin_enum NOT NULL DEFAULT 'inbound_telegram',
     ADD COLUMN IF NOT EXISTS preferred_platform platform_enum NULL;
 
 ALTER TABLE cv_documents

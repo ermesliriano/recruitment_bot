@@ -4,18 +4,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.routers import admin, internal, questions, tenant_questions, vacancies, webhook
+from app.routers import (
+    admin,
+    cv_imports,
+    internal,
+    questions,
+    tenant_questions,
+    vacancies,
+    webhook,
+)
 
 app = FastAPI(title="Recruitment SaaS", version="2.0.0")
 
+
 # ── CORS ──────────────────────────────────────────────────────────────────────
 origins = ["*"] if settings.allow_origins == "*" else settings.allow_origins.split(",")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(webhook.router)
