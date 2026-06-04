@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import case, select
 
-from app.channels.base import IncomingAttachment, IncomingMessageEvent, OutgoingMessage
+from app.channels.base import IncomingAttachment, IncomingMessageEvent, OutgoingMessage, outgoing_from_legacy
 from app.channels.whatsapp_twilio import TwilioWhatsAppGateway
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -26,6 +26,7 @@ from app.enums import (
     CvParseStatus,
     Platform,
     SourceScope,
+    VacancyStatus,
 )
 from app.logger import log_event
 from app.models import (
@@ -120,12 +121,13 @@ class RecruitmentService:
         session.current_state = next_state
         session.version += 1
 
-    def _get_or_create_session(self, db, tenant_id, chat_id: int, user_id: int | None) -> ConversationSession:
+    def _get_or_create_session(self, db, tenant, event: IncomingMessageEvent) -> ConversationSession:
         session = db.execute(
             select(ConversationSession)
             .where(
-                ConversationSession.tenant_id == tenant_id,
-                ConversationSession.platform_chat_id == chat_id,
+                ConversationSession.tenant_id == tenant.id,
+                ConversationSession.platform == event.platform,
+                ConversationSession.platform_chat_id == event.chat_id,
                 ConversationSession.is_active.is_(True),
             )
             .with_for_update()
@@ -135,10 +137,10 @@ class RecruitmentService:
             return session
 
         session = ConversationSession(
-            tenant_id=tenant_id,
-            platform=Platform.TELEGRAM,
-            platform_chat_id=chat_id,
-            platform_user_id=user_id,
+            tenant_id=tenant.id,
+            platform=event.platform,
+            platform_chat_id=event.chat_id,
+            platform_user_id=event.user_id,
             current_state=ChatState.WELCOME,
             state_payload={},
         )
@@ -153,12 +155,17 @@ class RecruitmentService:
             return [{"text": "He detectado varios errores consecutivos. Te derivo con RRHH."}]
         return [{"text": message}]
 
-    def dispatch(self, db, tenant: Tenant, event: IncomingEvent, background_tasks) -> list[dict[str, Any]]:
-        session = self._get_or_create_session(db, tenant.id, event.chat_id, event.user_id)
+    def dispatch(self, db, tenant: Tenant, event: IncomingMessageEvent, background_tasks) -> list[dict[str, Any]]:
+        session = self._get_or_create_session(db, tenant, event)
 
-        if session.last_incoming_update_id and event.update_id <= session.last_incoming_update_id:
+        if (
+            session.last_incoming_event_id
+            and event.event_id
+            and event.event_id == session.last_incoming_event_id
+        ):
             return []
-        session.last_incoming_update_id = event.update_id
+        session.last_incoming_event_id = event.event_id
+        session.last_user_message_at = datetime.now(timezone.utc)
 
         if detect_human_request(event):
             return self._escalate_human(db, session, "Solicitud explícita de humano")
@@ -199,17 +206,11 @@ class RecruitmentService:
             ).scalar_one_or_none()
 
             if not candidate:
-                candidate = Candidate(
-                    tenant_id=tenant.id,
-                    phone_e164=phone,
-                    telegram_chat_id=event.chat_id,
-                    telegram_user_id=event.user_id,
-                )
+                candidate = Candidate(tenant_id=tenant.id, phone_e164=phone)
                 db.add(candidate)
                 db.flush()
-            else:
-                candidate.telegram_chat_id = event.chat_id
-                candidate.telegram_user_id = event.user_id
+
+            self._bind_candidate_channel(candidate, event)
 
             session.candidate_id = candidate.id
             self._transition(session, ChatState.SELECT_VACANCY)
@@ -220,10 +221,24 @@ class RecruitmentService:
             "reply_markup": TelegramGateway.phone_keyboard(),
         }]
 
+    @staticmethod
+    def _bind_candidate_channel(candidate: Candidate, event: IncomingMessageEvent) -> None:
+        if event.platform == Platform.TELEGRAM:
+            try:
+                candidate.telegram_chat_id = int(event.chat_id) if event.chat_id else None
+                candidate.telegram_user_id = int(event.user_id) if event.user_id else None
+            except (TypeError, ValueError):
+                pass
+        else:
+            candidate.whatsapp_from = event.from_address
+            candidate.whatsapp_wa_id = event.user_id
+            if event.sender_name:
+                candidate.whatsapp_profile_name = event.sender_name
+
     def _show_vacancies(self, db, tenant, session):
         vacancies = db.execute(
             select(Vacancy.id, Vacancy.title)
-            .where(Vacancy.tenant_id == tenant.id, Vacancy.status == "active")
+            .where(Vacancy.tenant_id == tenant.id, Vacancy.status == VacancyStatus.ACTIVE)
             .order_by(Vacancy.created_at.desc())
         ).all()
 
@@ -237,15 +252,29 @@ class RecruitmentService:
         }]
 
     def _handle_select_vacancy(self, db, tenant, session, event):
-        if not event.callback_data or not event.callback_data.startswith("vac:"):
-            return self._invalid(session, "Debes seleccionar una vacante usando los botones.")
+        vacancy_id = None
+        if event.callback_data and event.callback_data.startswith("vac:"):
+            vacancy_id = event.callback_data.split(":", 1)[1]
+        elif event.text and event.text.strip().isdigit():
+            # Canales sin botones (WhatsApp): el candidato responde con el numero
+            # de la lista mostrada en _show_vacancies (mismo where + order_by).
+            choices = db.execute(
+                select(Vacancy.id)
+                .where(Vacancy.tenant_id == tenant.id, Vacancy.status == VacancyStatus.ACTIVE)
+                .order_by(Vacancy.created_at.desc())
+            ).scalars().all()
+            idx = int(event.text.strip()) - 1
+            if 0 <= idx < len(choices):
+                vacancy_id = str(choices[idx])
 
-        vacancy_id = event.callback_data.split(":", 1)[1]
+        if not vacancy_id:
+            return self._invalid(session, "Debes seleccionar una vacante de la lista.")
+
         vacancy = db.execute(
             select(Vacancy).where(
                 Vacancy.id == vacancy_id,
                 Vacancy.tenant_id == tenant.id,
-                Vacancy.status == "active",
+                Vacancy.status == VacancyStatus.ACTIVE,
             )
         ).scalar_one_or_none()
 
@@ -316,18 +345,33 @@ class RecruitmentService:
         return self._invalid(session, "Haz una pregunta o pulsa Continuar.")
 
     def _handle_request_cv(self, db, tenant, session, event, background_tasks):
-        if not event.document:
+        if not event.attachments:
             return self._invalid(session, "Necesito el CV en PDF/JPG/PNG.")
         return self._process_cv(db, tenant, session, event, background_tasks)
 
+    @staticmethod
+    def _download_attachment(tenant, event: IncomingMessageEvent, attachment: IncomingAttachment):
+        """Descarga el binario del adjunto según el canal.
+        Devuelve (bytes, source_file_id, source_file_unique_id).
+        """
+        if event.platform == Platform.TELEGRAM:
+            gateway = TelegramGateway(tenant.telegram_bot_token)
+            file_bytes, _ = gateway.get_file_bytes(attachment.attachment_id)
+            return file_bytes, attachment.attachment_id, attachment.metadata.get("file_unique_id")
+
+        gateway = TwilioWhatsAppGateway.from_tenant(tenant)
+        file_bytes = gateway.download_media(attachment.url)
+        return file_bytes, attachment.attachment_id, None
+
     def _process_cv(self, db, tenant, session, event, background_tasks):
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
-        gateway = TelegramGateway(tenant.telegram_bot_token)
-        file_bytes, _ = gateway.get_file_bytes(event.document["file_id"])
 
-        filename = event.document["file_name"]
-        mime_type = event.document["mime_type"]
-        size_bytes = event.document["file_size"]
+        attachment = event.attachments[0]
+        file_bytes, source_file_id, source_file_unique_id = self._download_attachment(tenant, event, attachment)
+
+        filename = attachment.filename or "cv.bin"
+        mime_type = attachment.mime_type or "application/octet-stream"
+        size_bytes = attachment.size_bytes or len(file_bytes)
         ext = validate_cv(filename, mime_type, size_bytes)
 
         version = next_cv_version(db, app.id)
@@ -343,8 +387,10 @@ class RecruitmentService:
             extension=ext,
             size_bytes=size_bytes,
             sha256=sha256_bytes(file_bytes),
-            telegram_file_id=event.document["file_id"],
-            telegram_file_unique_id=event.document.get("file_unique_id"),
+            source_platform=event.platform,
+            source_file_id=source_file_id,
+            source_file_unique_id=source_file_unique_id,
+            source_metadata_json={"source": f"inbound_{event.platform.value}"},
             storage_backend=backend_enum,
             storage_key=storage_key,
             content=content_blob,
@@ -1014,7 +1060,35 @@ class RecruitmentService:
 
         return result
 
-    def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id):
+    def _send_session_messages(self, db, tenant, session, outgoing: list[dict]) -> None:
+        """Envía los dicts legacy de respuesta por el canal de la sesión.
+        Se usa desde tareas en background (pipeline de CV), donde no hay webhook
+        que entregue la respuesta.
+        """
+        if not outgoing:
+            return
+
+        if session.platform == Platform.TELEGRAM:
+            gateway = TelegramGateway(tenant.telegram_bot_token)
+            for msg in outgoing:
+                try:
+                    gateway.send_message(int(session.platform_chat_id), msg["text"], msg.get("reply_markup"))
+                except Exception as send_exc:
+                    log_event(db=db, level="ERROR", source="cv_pipeline", event="MSG_SEND_FAILED",
+                              message=str(send_exc), application_id=session.application_id)
+            return
+
+        gateway = TwilioWhatsAppGateway.from_tenant(tenant)
+        for msg in outgoing:
+            try:
+                gateway.send_message(
+                    outgoing_from_legacy(Platform.WHATSAPP, session.platform_chat_id, msg)
+                )
+            except Exception as send_exc:
+                log_event(db=db, level="ERROR", source="cv_pipeline", event="MSG_SEND_FAILED",
+                          message=str(send_exc), application_id=session.application_id)
+
+    def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id, dispatch_messages: bool = True):
         with SessionLocal() as db:
             log_event(db=db, level="INFO", source="cv_pipeline", event="PIPELINE_START",
                       tenant_id=tenant_id, application_id=application_id)
@@ -1114,23 +1188,8 @@ class RecruitmentService:
 
                     db.commit()
 
-                    gateway = TelegramGateway(tenant.telegram_bot_token)
-                    for msg in outgoing:
-                        try:
-                            gateway.send_message(
-                                session.platform_chat_id,
-                                msg["text"],
-                                msg.get("reply_markup"),
-                            )
-                        except Exception as send_exc:
-                            log_event(
-                                db=db,
-                                level="ERROR",
-                                source="cv_pipeline",
-                                event="MSG_SEND_FAILED",
-                                message=str(send_exc),
-                                application_id=app.id,
-                            )
+                    if dispatch_messages:
+                        self._send_session_messages(db, tenant, session, outgoing)
 
                     return
 

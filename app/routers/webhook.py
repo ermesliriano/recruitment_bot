@@ -7,7 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from app.channels.base import IncomingAttachment, IncomingMessageEvent
+from app.channels.base import IncomingAttachment, IncomingMessageEvent, outgoing_from_legacy
 from app.channels.whatsapp_twilio import TwilioWhatsAppGateway
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -69,6 +69,29 @@ def _load_tenant(db, tenant_slug: str | None) -> Tenant:
     return tenant
 
 
+def _deliver_inbound_replies(tenant, event: IncomingMessageEvent, outgoing: list[dict]) -> None:
+    """Entrega las respuestas del state machine por el mismo canal del entrante.
+
+    Para respuestas a un inbound la ventana de 24h de WhatsApp esta abierta por
+    definicion (el candidato acaba de escribir), por eso se envia directo por el
+    gateway sin pasar por OutboundMessageService (que reserva la validacion de
+    ventana para el flujo outbound iniciado por el reclutador).
+    """
+    if not outgoing:
+        return
+
+    if event.platform == Platform.TELEGRAM:
+        gateway = TelegramGateway(tenant.telegram_bot_token)
+        for msg in outgoing:
+            gateway.send_message(int(event.chat_id), msg["text"], msg.get("reply_markup"))
+        return
+
+    gateway = TwilioWhatsAppGateway.from_tenant(tenant)
+    to_address = event.from_address or event.chat_id
+    for msg in outgoing:
+        gateway.send_message(outgoing_from_legacy(Platform.WHATSAPP, to_address, msg))
+
+
 @router.post("/telegram/{tenant_slug}")
 async def telegram_webhook(
     tenant_slug: str,
@@ -96,8 +119,7 @@ async def telegram_webhook(
         if old_event.callback_query_id:
             TelegramGateway(tenant.telegram_bot_token).answer_callback_query(old_event.callback_query_id)
 
-        if outgoing:
-            OutboundMessageService().deliver_batch(db, tenant, outgoing)
+        _deliver_inbound_replies(tenant, event, outgoing)
 
         return {"ok": True}
 
@@ -139,8 +161,7 @@ async def whatsapp_webhook(
         outgoing = service.dispatch(db, tenant, event, background_tasks)
         db.commit()
 
-        if outgoing:
-            OutboundMessageService().deliver_batch(db, tenant, outgoing)
+        _deliver_inbound_replies(tenant, event, outgoing)
 
         return {"ok": True}
 

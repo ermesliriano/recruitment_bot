@@ -62,3 +62,32 @@ class MessagingGateway(Protocol):
 
     def send_message(self, message: OutgoingMessage) -> dict[str, Any]:
         ...
+
+
+def outgoing_from_legacy(platform: Platform, to_user_id: str, msg: dict[str, Any]) -> "OutgoingMessage":
+    """Adapta los dicts legacy de la maquina de estados ({"text", "reply_markup"})
+    al contrato OutgoingMessage agnostico de canal.
+
+    - inline_keyboard de Telegram -> options [{"id": callback_data, "title": text}]
+    - teclado de contacto de Telegram -> metadata["telegram_keyboard"] = "request_contact"
+    """
+    reply_markup = msg.get("reply_markup") or {}
+    options: list[dict[str, Any]] = []
+    metadata: dict[str, Any] = {}
+
+    for row in reply_markup.get("inline_keyboard") or []:
+        for button in row:
+            options.append({"id": button.get("callback_data"), "title": button.get("text")})
+
+    for row in reply_markup.get("keyboard") or []:
+        for button in row:
+            if isinstance(button, dict) and button.get("request_contact"):
+                metadata["telegram_keyboard"] = "request_contact"
+
+    return OutgoingMessage(
+        platform=platform,
+        to_user_id=to_user_id,
+        text=msg.get("text"),
+        options=options,
+        metadata=metadata,
+    )

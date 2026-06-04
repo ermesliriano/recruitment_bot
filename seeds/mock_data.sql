@@ -28,7 +28,7 @@ INSERT INTO vacancies (
   salary_text, schedule_text, location_text, benefits,
   faq_context, cv_max_score, classification_thresholds, status
 ) VALUES (
-  '22222222-2222-2222-2222-222222222222',
+  '22222222-2222-2222-2222-222222222303',
   '11111111-1111-1111-1111-111111111111',
   'BE-PY-001',
   'Backend Python FastAPI',
