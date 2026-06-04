@@ -1,9 +1,9 @@
 -- seeds/mock_data.sql
-truncate table tenants, vacancies, questions, vacancy_questions, candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, scoring_rules, system_logs;
+truncate table tenant_questions, tenants, vacancies, questions, vacancy_questions, candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, scoring_rules, system_logs, outbound_messages, cv_import_jobs, cv_import_job_items;
 truncate table candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, system_logs;
  
 INSERT INTO tenants (
-  id, slug, name, hr_email, telegram_bot_token, telegram_webhook_secret, settings_json
+  id, slug, name, hr_email, telegram_bot_token, telegram_webhook_secret, settings_json, is_active, whatsapp_enabled, whatsapp_use_env_credentials, whatsapp_messaging_service_sid, whatsapp_sender_address, whatsapp_initial_template_sid, whatsapp_initial_template_language, whatsapp_assume_opt_in
 ) VALUES (
   '11111111-1111-1111-1111-111111111111',
   'cesaria',
@@ -11,8 +11,16 @@ INSERT INTO tenants (
   'rrhh@cesaria.test',
   '8789717115:AAGMh8fDoEvB6tDW6R_b5nYCRqADF6PnNFM',
   'telegram-secret-cesaria',
-  '{"brand":"Cesaria","notify_top_n":5}'::jsonb
-);
+  '{"brand":"Cesaria","notify_top_n":5}'::jsonb,
+  TRUE,
+  TRUE,
+  TRUE,
+  'MG58bf7a67487a7240785f173109e55996',
+  'whatsapp:+18492680377',
+  'HX46e91532d66b1f82a4923af6bdb83ace',
+  'es',
+  TRUE
+  );
 
 INSERT INTO vacancies (
   id, tenant_id, code, title, description, responsibilities,

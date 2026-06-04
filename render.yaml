@@ -40,5 +40,5 @@ services:
 databases:
   - name: recruitment-db
     plan: free
-    databaseName: recruitment_db_j1pp
-    user: recruitment
+    databaseName: recruitment_db_6l1g
+    user: recruitment_db_6l1g_user
