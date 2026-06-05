@@ -14,6 +14,7 @@ from sqlalchemy import case, select
 
 from app.channels.base import IncomingAttachment, IncomingMessageEvent, OutgoingMessage, outgoing_from_legacy
 from app.channels.whatsapp_twilio import TwilioWhatsAppGateway
+from app.telegram_api import TelegramGateway
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.cv_pipeline import extract_cv_text, get_storage, next_cv_version, normalize_phone, sha256_bytes, validate_cv
