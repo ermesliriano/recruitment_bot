@@ -11,6 +11,7 @@ from app.channels.base import IncomingAttachment, IncomingMessageEvent, outgoing
 from app.channels.whatsapp_twilio import TwilioWhatsAppGateway
 from app.core.config import settings
 from app.core.db import SessionLocal
+from app.logger import log_event
 from app.enums import Platform
 from app.models.tenant import Tenant
 from app.services.outbound_message_service import OutboundMessageService
@@ -99,6 +100,7 @@ async def telegram_webhook(
     background_tasks: BackgroundTasks,
 ):
     db = SessionLocal()
+    tenant = None
     try:
         payload = await request.json()
         tenant = _load_tenant(db, tenant_slug)
@@ -124,6 +126,11 @@ async def telegram_webhook(
         return {"ok": True}
 
     except Exception as exc:
+        log_event(
+            level="ERROR", source="telegram_webhook", event="TELEGRAM_WEBHOOK_EXCEPTION",
+            tenant_id=tenant.id if tenant else None,
+            message=str(exc), exc=exc,
+        )
         return JSONResponse(
             status_code=500,
             content={"error": str(exc), "trace": traceback.format_exc()},
@@ -139,33 +146,76 @@ async def whatsapp_webhook(
     background_tasks: BackgroundTasks,
 ):
     db = SessionLocal()
+    tenant = None
     try:
         tenant = _load_tenant(db, tenant_slug)
         raw_body = await request.body()
         form_params = TwilioWhatsAppGateway.form_params_from_body(raw_body)
         signature = request.headers.get("X-Twilio-Signature")
+        public_url = _public_request_url(request)
+
+        log_event(
+            level="INFO", source="whatsapp_webhook", event="WHATSAPP_INBOUND",
+            tenant_id=tenant.id,
+            payload={
+                "from": form_params.get("From"),
+                "to": form_params.get("To"),
+                "body": form_params.get("Body"),
+                "num_media": form_params.get("NumMedia"),
+                "message_sid": form_params.get("MessageSid"),
+                "has_signature": bool(signature),
+                "validation_url": public_url,
+            },
+        )
+
         gateway = TwilioWhatsAppGateway.from_tenant(tenant)
 
         if not gateway.validate_request(
-            url=_public_request_url(request),
+            url=public_url,
             params=form_params,
             signature=signature,
         ):
+            log_event(
+                level="WARNING", source="whatsapp_webhook", event="WHATSAPP_SIGNATURE_INVALID",
+                tenant_id=tenant.id,
+                message="La firma de Twilio no valido. Revisa PUBLIC_BASE_URL y que TWILIO_ACCOUNT_SID/AUTH_TOKEN sean de esta cuenta.",
+                payload={"validation_url": public_url, "has_signature": bool(signature)},
+            )
             return JSONResponse(status_code=403, content={"error": "Firma Twilio inválida"})
 
         event = gateway.parse_incoming(form_params)
         if not event.chat_id:
+            log_event(
+                level="WARNING", source="whatsapp_webhook", event="WHATSAPP_NO_CHAT_ID",
+                tenant_id=tenant.id, payload={"from": form_params.get("From")},
+            )
             return {"ok": True}
 
         service = RecruitmentService()
         outgoing = service.dispatch(db, tenant, event, background_tasks)
         db.commit()
 
+        log_event(
+            level="INFO", source="whatsapp_webhook", event="WHATSAPP_DISPATCH_OK",
+            tenant_id=tenant.id,
+            payload={"reply_count": len(outgoing), "to": event.from_address or event.chat_id},
+        )
+
         _deliver_inbound_replies(tenant, event, outgoing)
+
+        log_event(
+            level="INFO", source="whatsapp_webhook", event="WHATSAPP_REPLY_SENT",
+            tenant_id=tenant.id, payload={"reply_count": len(outgoing)},
+        )
 
         return {"ok": True}
 
     except Exception as exc:
+        log_event(
+            level="ERROR", source="whatsapp_webhook", event="WHATSAPP_WEBHOOK_EXCEPTION",
+            tenant_id=tenant.id if tenant else None,
+            message=str(exc), exc=exc,
+        )
         return JSONResponse(
             status_code=500,
             content={"error": str(exc), "trace": traceback.format_exc()},
