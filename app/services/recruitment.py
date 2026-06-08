@@ -110,8 +110,42 @@ def answer_faq_question(faq_context: dict[str, Any], user_question: str) -> str 
 
 
 class RecruitmentService:
+    QA_OPTIONS: list[tuple[str, str]] = [
+        ("go:continue", "Continuar"),
+        ("go:human", "Hablar con RRHH"),
+    ]
+
     def __init__(self) -> None:
         self.llm = LlmClient()
+
+    # ── Helpers de opciones (multicanal) ──────────────────────────
+
+    @staticmethod
+    def _reply_hint(session: ConversationSession) -> str:
+        """Instruccion de como elegir, segun el canal (Telegram tiene botones;
+        WhatsApp responde con el numero)."""
+        if session.platform == Platform.WHATSAPP:
+            return "Responde con el número de la opción (por ejemplo, 1)."
+        return "Pulsa una de las opciones de abajo."
+
+    @staticmethod
+    def _selected_option_id(event: IncomingMessageEvent, options: list[tuple[str, str]]) -> str | None:
+        """Resuelve la opcion elegida desde callback_data (Telegram) o desde
+        texto/numero (canales sin botones como WhatsApp). `options` va en el
+        mismo orden en que se muestran al usuario."""
+        if event.callback_data:
+            return event.callback_data
+        if not event.text:
+            return None
+        text = norm(event.text)
+        if text.isdigit():
+            idx = int(text) - 1
+            if 0 <= idx < len(options):
+                return options[idx][0]
+        for opt_id, label in options:
+            if text == norm(label):
+                return opt_id
+        return None
 
     # ── State machine ────────────────────────────────────────────────────────
 
@@ -248,28 +282,41 @@ class RecruitmentService:
 
         session.state_payload = {}
         return [{
-            "text": "Estas son las vacantes activas. Elige una.",
+            "text": "Estas son las vacantes activas. " + self._reply_hint(session),
             "reply_markup": TelegramGateway.vacancy_keyboard([(str(v.id), v.title) for v in vacancies]),
         }]
 
     def _handle_select_vacancy(self, db, tenant, session, event):
+        choices = db.execute(
+            select(Vacancy.id, Vacancy.title)
+            .where(Vacancy.tenant_id == tenant.id, Vacancy.status == VacancyStatus.ACTIVE)
+            .order_by(Vacancy.created_at.desc())
+        ).all()
+
         vacancy_id = None
         if event.callback_data and event.callback_data.startswith("vac:"):
             vacancy_id = event.callback_data.split(":", 1)[1]
-        elif event.text and event.text.strip().isdigit():
+        elif event.text:
             # Canales sin botones (WhatsApp): el candidato responde con el numero
-            # de la lista mostrada en _show_vacancies (mismo where + order_by).
-            choices = db.execute(
-                select(Vacancy.id)
-                .where(Vacancy.tenant_id == tenant.id, Vacancy.status == VacancyStatus.ACTIVE)
-                .order_by(Vacancy.created_at.desc())
-            ).scalars().all()
-            idx = int(event.text.strip()) - 1
-            if 0 <= idx < len(choices):
-                vacancy_id = str(choices[idx])
+            # de la lista mostrada en _show_vacancies (mismo where + order_by), o
+            # con el titulo de la vacante.
+            text = event.text.strip()
+            if text.isdigit():
+                idx = int(text) - 1
+                if 0 <= idx < len(choices):
+                    vacancy_id = str(choices[idx].id)
+            else:
+                norm_text = norm(text)
+                for vid, title in choices:
+                    if norm_text and (norm_text == norm(title) or norm_text in norm(title)):
+                        vacancy_id = str(vid)
+                        break
 
         if not vacancy_id:
-            return self._invalid(session, "Debes seleccionar una vacante de la lista.")
+            return self._invalid(
+                session,
+                "No reconocí esa vacante. " + self._reply_hint(session),
+            )
 
         vacancy = db.execute(
             select(Vacancy).where(
@@ -308,7 +355,13 @@ class RecruitmentService:
 
         self._transition(session, ChatState.VACANCY_QA_MODE)
         return [{
-            "text": "Perfecto. Puedes hacer preguntas sobre la vacante o pulsa Continuar para enviar tu CV.",
+            "text": (
+                "Perfecto. Puedes hacerme una pregunta sobre la vacante, "
+                "o elegir una opción para seguir:\n"
+                "• *Continuar* para enviar tu CV.\n"
+                "• *Hablar con RRHH* si prefieres atención humana.\n"
+                + self._reply_hint(session)
+            ),
             "reply_markup": TelegramGateway.qa_keyboard(),
         }]
 
@@ -317,7 +370,12 @@ class RecruitmentService:
             select(Vacancy).where(Vacancy.id == session.state_payload["vacancy_id"])
         ).scalar_one()
 
-        if event.callback_data == "go:continue":
+        choice = self._selected_option_id(event, self.QA_OPTIONS)
+
+        if choice == "go:human":
+            return self._escalate_human(db, session, "Candidato eligió hablar con RRHH")
+
+        if choice == "go:continue":
             tenant_questions = self._get_ordered_tenant_questions(db, tenant.id)
 
             if tenant_questions:
@@ -337,13 +395,30 @@ class RecruitmentService:
         if event.text:
             answer = answer_faq_question(vacancy.faq_context, event.text)
             if answer:
-                return [{"text": answer, "reply_markup": TelegramGateway.qa_keyboard()}]
+                return [{
+                    "text": (
+                        f"{answer}\n\n"
+                        "Si tienes otra duda, escríbela. Cuando quieras seguir, elige una opción:\n"
+                        f"{self._reply_hint(session)}"
+                    ),
+                    "reply_markup": TelegramGateway.qa_keyboard(),
+                }]
             return [{
-                "text": "No tengo esa respuesta. Puedes continuar o pedir hablar con RRHH.",
+                "text": (
+                    "No encontré una respuesta a esa pregunta. Puedes reformularla con otras palabras, "
+                    "o elegir una opción para seguir:\n"
+                    "• *Continuar* para enviar tu CV.\n"
+                    "• *Hablar con RRHH* si prefieres atención humana.\n"
+                    f"{self._reply_hint(session)}"
+                ),
                 "reply_markup": TelegramGateway.qa_keyboard(),
             }]
 
-        return self._invalid(session, "Haz una pregunta o pulsa Continuar.")
+        return self._invalid(
+            session,
+            "Escríbeme una pregunta sobre la vacante, o elige una opción para continuar. "
+            + self._reply_hint(session),
+        )
 
     def _handle_request_cv(self, db, tenant, session, event, background_tasks):
         if not event.attachments:
