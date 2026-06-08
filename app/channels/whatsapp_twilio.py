@@ -117,7 +117,11 @@ class TwilioWhatsAppGateway(MessagingGateway):
         )
 
     def download_media(self, url: str) -> bytes:
-        response = self._http.get(url)
+        # La URL de media de Twilio (api.twilio.com/.../Media/ME...) responde con
+        # un 307 hacia el CDN pre-firmado (mms.twiliocdn.com). Hay que seguir el
+        # redirect; httpx elimina la cabecera Authorization al cambiar de host,
+        # y el CDN no la necesita porque la URL ya va firmada.
+        response = self._http.get(url, follow_redirects=True)
         response.raise_for_status()
         return response.content
 
