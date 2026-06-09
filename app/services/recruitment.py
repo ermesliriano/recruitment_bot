@@ -52,7 +52,7 @@ logger = logging.getLogger("recruitment")
 ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
     ChatState.WELCOME: {ChatState.SELECT_VACANCY, ChatState.ESCALATE_HUMAN, ChatState.WELCOME},
     ChatState.SELECT_VACANCY: {ChatState.CAPTURE_NAME, ChatState.ESCALATE_HUMAN, ChatState.SELECT_VACANCY},
-    ChatState.CAPTURE_NAME: {ChatState.VACANCY_QA_MODE, ChatState.ESCALATE_HUMAN, ChatState.CAPTURE_NAME},
+    ChatState.CAPTURE_NAME: {ChatState.ASK_TENANT_QUESTIONS, ChatState.REQUEST_CV, ChatState.ESCALATE_HUMAN, ChatState.CAPTURE_NAME},
     ChatState.VACANCY_QA_MODE: {
         ChatState.VACANCY_QA_MODE,
         ChatState.ASK_TENANT_QUESTIONS,
@@ -91,30 +91,7 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
 }
 
 
-def detect_human_request(event: IncomingMessageEvent) -> bool:
-    text = norm(event.text)
-    return text in {"humano", "asesor", "rrhh", "reclutador", "agent", "human"} \
-        or event.callback_data == "go:human"
-
-
-def answer_faq_question(faq_context: dict[str, Any], user_question: str) -> str | None:
-    q_tokens = set(norm(user_question).split())
-    best_score, best_answer = 0, None
-    for item in faq_context.get("items", []):
-        tokens = set(norm(item.get("question", "")).split())
-        tokens.update(norm(" ".join(item.get("keywords", []))).split())
-        score = len(q_tokens & tokens)
-        if score > best_score:
-            best_score, best_answer = score, item.get("answer")
-    return best_answer if best_score >= 1 else None
-
-
 class RecruitmentService:
-    QA_OPTIONS: list[tuple[str, str]] = [
-        ("go:continue", "Continuar"),
-        ("go:human", "Hablar con RRHH"),
-    ]
-
     def __init__(self) -> None:
         self.llm = LlmClient()
 
@@ -127,25 +104,6 @@ class RecruitmentService:
         if session.platform == Platform.WHATSAPP:
             return "Responde con el número de la opción (por ejemplo, 1)."
         return "Pulsa una de las opciones de abajo."
-
-    @staticmethod
-    def _selected_option_id(event: IncomingMessageEvent, options: list[tuple[str, str]]) -> str | None:
-        """Resuelve la opcion elegida desde callback_data (Telegram) o desde
-        texto/numero (canales sin botones como WhatsApp). `options` va en el
-        mismo orden en que se muestran al usuario."""
-        if event.callback_data:
-            return event.callback_data
-        if not event.text:
-            return None
-        text = norm(event.text)
-        if text.isdigit():
-            idx = int(text) - 1
-            if 0 <= idx < len(options):
-                return options[idx][0]
-        for opt_id, label in options:
-            if text == norm(label):
-                return opt_id
-        return None
 
     # ── State machine ────────────────────────────────────────────────────────
 
@@ -185,9 +143,6 @@ class RecruitmentService:
 
     def _invalid(self, session: ConversationSession, message: str) -> list[dict]:
         session.invalid_input_count += 1
-        if session.invalid_input_count >= 3:
-            self._transition(session, ChatState.ESCALATE_HUMAN)
-            return [{"text": "He detectado varios errores consecutivos. Te derivo con RRHH."}]
         return [{"text": message}]
 
     def dispatch(self, db, tenant: Tenant, event: IncomingMessageEvent, background_tasks) -> list[dict[str, Any]]:
@@ -202,9 +157,6 @@ class RecruitmentService:
         session.last_incoming_event_id = event.event_id
         session.last_user_message_at = datetime.now(timezone.utc)
 
-        if detect_human_request(event):
-            return self._escalate_human(db, session, "Solicitud explícita de humano")
-
         if session.current_state == ChatState.CONFIRM_AND_CLOSE and norm(event.text) == "/start":
             self._transition(session, ChatState.SELECT_VACANCY)
             return self._show_vacancies(db, tenant, session)
@@ -213,11 +165,11 @@ class RecruitmentService:
             ChatState.WELCOME: self._handle_welcome,
             ChatState.SELECT_VACANCY: self._handle_select_vacancy,
             ChatState.CAPTURE_NAME: self._handle_capture_name,
-            ChatState.VACANCY_QA_MODE: self._handle_vacancy_qa,
             ChatState.ASK_TENANT_QUESTIONS: self._handle_ask_tenant_questions,
             ChatState.REQUEST_CV: self._handle_request_cv,
             ChatState.ASK_VACANCY_QUESTIONS: self._handle_ask_questions,
             ChatState.SCORING: lambda db, t, s, e: [{"text": "Estoy evaluando tu candidatura. Te escribiré en breve."}],
+            ChatState.CONFIRM_AND_CLOSE: lambda db, t, s, e: [{"text": "Tu postulación ya está completa. Escribe /start para postular a otra vacante activa."}],
         }
 
         handler = handlers.get(session.current_state)
@@ -226,7 +178,7 @@ class RecruitmentService:
                 if session.current_state in {ChatState.REQUEST_CV} \
                 else handler(db, tenant, session, event)
 
-        return [{"text": "Estado no soportado. Te derivo con RRHH."}]
+        return [{"text": "No te he entendido. Escribe /start para empezar de nuevo."}]
 
     # ── Handlers de estado ───────────────────────────────────────────────────
 
@@ -352,73 +304,21 @@ class RecruitmentService:
 
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
         app.status = ApplicationStatus.IN_PROGRESS
+        session.invalid_input_count = 0
 
-        self._transition(session, ChatState.VACANCY_QA_MODE)
+        tenant_questions = self._get_ordered_tenant_questions(db, tenant.id)
+        if tenant_questions:
+            session.state_payload = {**session.state_payload, "tenant_question_index": 0}
+            self._transition(session, ChatState.ASK_TENANT_QUESTIONS)
+            return [
+                {"text": f"Gracias, {candidate.full_name}. Antes de tu CV necesito hacerte unas preguntas."},
+                *self._ask_next_tenant_question(db, tenant, session),
+            ]
+
+        self._transition(session, ChatState.REQUEST_CV)
         return [{
-            "text": (
-                "Perfecto. Puedes hacerme una pregunta sobre la vacante, "
-                "o elegir una opción para seguir:\n"
-                "• *Continuar* para enviar tu CV.\n"
-                "• *Hablar con RRHH* si prefieres atención humana.\n"
-                + self._reply_hint(session)
-            ),
-            "reply_markup": TelegramGateway.qa_keyboard(),
+            "text": f"Gracias, {candidate.full_name}. Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."
         }]
-
-    def _handle_vacancy_qa(self, db, tenant, session, event):
-        vacancy = db.execute(
-            select(Vacancy).where(Vacancy.id == session.state_payload["vacancy_id"])
-        ).scalar_one()
-
-        choice = self._selected_option_id(event, self.QA_OPTIONS)
-
-        if choice == "go:human":
-            return self._escalate_human(db, session, "Candidato eligió hablar con RRHH")
-
-        if choice == "go:continue":
-            tenant_questions = self._get_ordered_tenant_questions(db, tenant.id)
-
-            if tenant_questions:
-                session.state_payload = {
-                    **session.state_payload,
-                    "tenant_question_index": 0,
-                }
-                self._transition(session, ChatState.ASK_TENANT_QUESTIONS)
-                return [
-                    {"text": "Antes de enviarme tu CV necesito hacerte unas preguntas generales."},
-                    *self._ask_next_tenant_question(db, tenant, session),
-                ]
-
-            self._transition(session, ChatState.REQUEST_CV)
-            return [{"text": "Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
-
-        if event.text:
-            answer = answer_faq_question(vacancy.faq_context, event.text)
-            if answer:
-                return [{
-                    "text": (
-                        f"{answer}\n\n"
-                        "Si tienes otra duda, escríbela. Cuando quieras seguir, elige una opción:\n"
-                        f"{self._reply_hint(session)}"
-                    ),
-                    "reply_markup": TelegramGateway.qa_keyboard(),
-                }]
-            return [{
-                "text": (
-                    "No encontré una respuesta a esa pregunta. Puedes reformularla con otras palabras, "
-                    "o elegir una opción para seguir:\n"
-                    "• *Continuar* para enviar tu CV.\n"
-                    "• *Hablar con RRHH* si prefieres atención humana.\n"
-                    f"{self._reply_hint(session)}"
-                ),
-                "reply_markup": TelegramGateway.qa_keyboard(),
-            }]
-
-        return self._invalid(
-            session,
-            "Escríbeme una pregunta sobre la vacante, o elige una opción para continuar. "
-            + self._reply_hint(session),
-        )
 
     def _handle_request_cv(self, db, tenant, session, event, background_tasks):
         if not event.attachments:
@@ -941,17 +841,12 @@ class RecruitmentService:
                       application_id=app.id)
             self._notify_top_candidates(db, app.tenant_id, app.vacancy_id)
 
-            labels = {
-                Classification.SHORTLIST: "✅ Shortlist — muy buena candidatura",
-                Classification.INTERVIEW: "👍 Entrevista recomendada",
-                Classification.REVIEW: "🔍 En revisión por RRHH",
-                Classification.REJECT: "❌ No seleccionado en esta ocasión",
-            }
             return [{"text": (
-                f"Hemos procesado tu candidatura.\n"
-                f"Resultado: {labels[classification]}\n\n"
-                f"Puntuación total: {total:.1f}\n"
-                f"Escribe /start para postular a otra vacante."
+                "¡Gracias por completar tu postulación y por responder a las preguntas! "
+                "Hemos recibido correctamente tu información y tu CV.\n\n"
+                "El equipo de RRHH revisará tu candidatura y te contactará próximamente "
+                "para darte feedback sobre los siguientes pasos.\n\n"
+                "Si quieres postular a otra vacante activa, escribe /start cuando quieras."
             )}]
         except Exception as e:
             log_event(db=db, level="ERROR", source="scoring", event="SCORING_EXCEPTION",
@@ -988,7 +883,12 @@ class RecruitmentService:
             app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
             app.status = ApplicationStatus.NEEDS_HUMAN
         self._transition(session, ChatState.ESCALATE_HUMAN)
-        return [{"text": f"Voy a derivar tu caso a RRHH. Motivo: {reason}"}]
+        log_event(db=db, level="WARNING", source="recruitment", event="ESCALATE_HUMAN",
+                  message=reason, application_id=session.application_id)
+        return [{"text": (
+            "Hemos registrado tu información. El equipo de RRHH revisará tu caso "
+            "y te contactará próximamente."
+        )}]
 
     # ── CV Pipeline async ─────────────────────────────────────────────────────
     def _questions_for_llm(self, db, vacancy_id) -> list[dict[str, Any]]:

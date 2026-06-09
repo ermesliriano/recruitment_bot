@@ -122,12 +122,3 @@ class TelegramGateway:
                 for vid, title in vacancies
             ]
         }
-
-    @staticmethod
-    def qa_keyboard() -> dict:
-        return {
-            "inline_keyboard": [
-                [{"text": "Continuar", "callback_data": "go:continue"}],
-                [{"text": "Hablar con RRHH", "callback_data": "go:human"}],
-            ]
-        }
