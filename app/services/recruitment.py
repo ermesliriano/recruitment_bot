@@ -62,6 +62,7 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
     ChatState.ASK_TENANT_QUESTIONS: {
         ChatState.ASK_TENANT_QUESTIONS,
         ChatState.REQUEST_CV,
+        ChatState.ASK_VACANCY_QUESTIONS,
         ChatState.ESCALATE_HUMAN,
     },
     ChatState.REQUEST_CV: {
@@ -71,6 +72,7 @@ ALLOWED_TRANSITIONS: dict[ChatState, set[ChatState]] = {
     },
     ChatState.WAITING_CANDIDATE_REPLY: {
         ChatState.WAITING_CANDIDATE_REPLY,
+        ChatState.ASK_TENANT_QUESTIONS,
         ChatState.ASK_VACANCY_QUESTIONS,
         ChatState.SCORING,
         ChatState.ESCALATE_HUMAN,
@@ -141,6 +143,75 @@ class RecruitmentService:
         db.flush()
         return session
 
+    def get_or_create_seeded_session(
+        self,
+        db,
+        *,
+        tenant_id,
+        candidate_id,
+        application_id,
+        phone_e164: str,
+        vacancy_id,
+    ) -> ConversationSession:
+        """Sesión para el flujo outbound (CV subido por el reclutador).
+
+        El platform_chat_id debe coincidir EXACTAMENTE con el chat_id que usará
+        el inbound de WhatsApp (from_address = "whatsapp:+<e164>"), para que al
+        responder el candidato _get_or_create_session reutilice esta sesión en
+        lugar de crear una nueva.
+        """
+        platform_chat_id = f"whatsapp:{phone_e164}"
+
+        session = db.execute(
+            select(ConversationSession)
+            .where(
+                ConversationSession.tenant_id == tenant_id,
+                ConversationSession.platform == Platform.WHATSAPP,
+                ConversationSession.platform_chat_id == platform_chat_id,
+                ConversationSession.is_active.is_(True),
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if session:
+            session.candidate_id = candidate_id
+            session.application_id = application_id
+            session.current_state = ChatState.WAITING_CANDIDATE_REPLY
+            session.state_payload = {"vacancy_id": str(vacancy_id), "question_index": 0}
+            session.invalid_input_count = 0
+            db.flush()
+            return session
+
+        session = ConversationSession(
+            tenant_id=tenant_id,
+            platform=Platform.WHATSAPP,
+            platform_chat_id=platform_chat_id,
+            platform_user_id=phone_e164,
+            candidate_id=candidate_id,
+            application_id=application_id,
+            current_state=ChatState.WAITING_CANDIDATE_REPLY,
+            state_payload={"vacancy_id": str(vacancy_id), "question_index": 0},
+        )
+        db.add(session)
+        db.flush()
+        return session
+
+    def count_pending_vacancy_questions(self, db, application_id) -> int:
+        """Cuántas preguntas de la vacante quedan sin respuesta válida
+        (tras el prefill del CV por el LLM)."""
+        app = db.execute(select(Application).where(Application.id == application_id)).scalar_one()
+        questions = self._get_ordered_questions(db, app.vacancy_id)
+        answered_ids = set(
+            db.execute(
+                select(Answer.vacancy_question_id).where(
+                    Answer.application_id == app.id,
+                    Answer.vacancy_question_id.is_not(None),
+                    Answer.is_valid.is_(True),
+                )
+            ).scalars().all()
+        )
+        return sum(1 for vq, _q in questions if vq.id not in answered_ids)
+
     def _invalid(self, session: ConversationSession, message: str) -> list[dict]:
         session.invalid_input_count += 1
         return [{"text": message}]
@@ -165,6 +236,7 @@ class RecruitmentService:
             ChatState.WELCOME: self._handle_welcome,
             ChatState.SELECT_VACANCY: self._handle_select_vacancy,
             ChatState.CAPTURE_NAME: self._handle_capture_name,
+            ChatState.WAITING_CANDIDATE_REPLY: self._handle_waiting_candidate_reply,
             ChatState.ASK_TENANT_QUESTIONS: self._handle_ask_tenant_questions,
             ChatState.REQUEST_CV: self._handle_request_cv,
             ChatState.ASK_VACANCY_QUESTIONS: self._handle_ask_questions,
@@ -319,6 +391,71 @@ class RecruitmentService:
         return [{
             "text": f"Gracias, {candidate.full_name}. Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."
         }]
+
+    def _handle_waiting_candidate_reply(self, db, tenant, session, event):
+        """El candidato responde a la plantilla outbound. El CV ya se procesó en
+        el intake (respuestas de vacante pre-rellenadas por el LLM). Retomamos
+        pidiendo primero las preguntas generales de tenant pendientes, luego las
+        de la vacante, y finalmente puntuamos.
+        """
+        app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
+        app.status = ApplicationStatus.IN_PROGRESS
+        session.invalid_input_count = 0
+
+        greeting = {"text": (
+            "¡Hola! Gracias por tu interés. Para completar tu candidatura "
+            "necesito hacerte unas preguntas rápidas."
+        )}
+
+        if self._has_pending_tenant_questions(db, tenant, app):
+            session.state_payload = {
+                **session.state_payload,
+                "tenant_question_index": 0,
+                "after_tenant_questions": "ask_vacancy_questions",
+            }
+            self._transition(session, ChatState.ASK_TENANT_QUESTIONS)
+            return [greeting, *self._ask_next_tenant_question(db, tenant, session)]
+
+        pending_vacancy = self.count_pending_vacancy_questions(db, app.id)
+        self._transition(session, ChatState.ASK_VACANCY_QUESTIONS)
+        messages = self._ask_next_question(db, app, session)
+        if pending_vacancy > 0:
+            return [greeting, *messages]
+        return messages
+
+    def _has_pending_tenant_questions(self, db, tenant, app) -> bool:
+        """Hay alguna pregunta de tenant (ask_before_cv) visible y sin responder."""
+        questions = self._get_ordered_tenant_questions(db, tenant.id)
+        if not questions:
+            return False
+        answers_by_field = self._tenant_answer_map(db, app.id)
+        answered_ids = set(
+            db.execute(
+                select(Answer.tenant_question_id).where(
+                    Answer.application_id == app.id,
+                    Answer.tenant_question_id.is_not(None),
+                    Answer.is_valid.is_(True),
+                )
+            ).scalars().all()
+        )
+        for tq, _q in questions:
+            if tq.id in answered_ids:
+                continue
+            if self._matches_display_condition(tq.display_condition, answers_by_field):
+                return True
+        return False
+
+    def _after_tenant_questions(self, db, session, app) -> list[dict]:
+        """Destino tras agotar las preguntas de tenant: en inbound se pide el CV;
+        en outbound (CV ya subido) se pasa a las preguntas de la vacante."""
+        if session.state_payload.get("after_tenant_questions") == "ask_vacancy_questions":
+            if session.current_state != ChatState.ASK_VACANCY_QUESTIONS:
+                self._transition(session, ChatState.ASK_VACANCY_QUESTIONS)
+            return self._ask_next_question(db, app, session)
+
+        if session.current_state != ChatState.REQUEST_CV:
+            self._transition(session, ChatState.REQUEST_CV)
+        return [{"text": "Gracias. Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
 
     def _handle_request_cv(self, db, tenant, session, event, background_tasks):
         if not event.attachments:
@@ -550,10 +687,7 @@ class RecruitmentService:
             "tenant_question_index": idx,
         }
 
-        if session.current_state != ChatState.REQUEST_CV:
-            self._transition(session, ChatState.REQUEST_CV)
-
-        return [{"text": "Gracias. Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
+        return self._after_tenant_questions(db, session, app)
 
     def _handle_ask_tenant_questions(self, db, tenant, session, event):
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
@@ -561,8 +695,7 @@ class RecruitmentService:
         idx = int(session.state_payload.get("tenant_question_index", 0))
 
         if idx >= len(questions):
-            self._transition(session, ChatState.REQUEST_CV)
-            return [{"text": "Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
+            return self._after_tenant_questions(db, session, app)
 
         tq, q = questions[idx]
 
@@ -1158,15 +1291,11 @@ class RecruitmentService:
                     db.commit()
                     return
 
-                if session.current_state == ChatState.SCORING:
+                if dispatch_messages and session.current_state == ChatState.SCORING:
                     self._transition(session, ChatState.ASK_VACANCY_QUESTIONS)
                     outgoing = self._ask_next_question(db, app, session)
-
                     db.commit()
-
-                    if dispatch_messages:
-                        self._send_session_messages(db, tenant, session, outgoing)
-
+                    self._send_session_messages(db, tenant, session, outgoing)
                     return
 
                 db.commit()

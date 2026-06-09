@@ -1,4 +1,5 @@
 # app/core/config.py
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,10 +15,28 @@ class Settings(BaseSettings):
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
-    twilio_whatsapp_messaging_service_sid: str | None = None
-    twilio_whatsapp_from_address: str | None = None
-    twilio_whatsapp_default_template_sid: str | None = None
-    twilio_whatsapp_default_template_language: str = "es"
+    twilio_whatsapp_messaging_service_sid: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "twilio_whatsapp_messaging_service_sid", "TWILIO_MESSAGING_SERVICE_SID"
+        ),
+    )
+    twilio_whatsapp_from_address: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("twilio_whatsapp_from_address", "TWILIO_WHATSAPP_FROM"),
+    )
+    twilio_whatsapp_default_template_sid: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "twilio_whatsapp_default_template_sid", "TWILIO_CONTENT_SID_CV_RECEIVED"
+        ),
+    )
+    twilio_whatsapp_default_template_language: str = Field(
+        default="es",
+        validation_alias=AliasChoices(
+            "twilio_whatsapp_default_template_language", "TWILIO_TEMPLATE_LANGUAGE"
+        ),
+    )
     whatsapp_default_tenant_slug: str | None = None
 
     llm_provider: str = "openai"
