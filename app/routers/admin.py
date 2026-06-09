@@ -73,7 +73,7 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
         "total": len(rows),
         "items": [
             RankingRow(
-                application_id=r.application_id,
+                application_id=str(r.application_id),
                 nombre=r.nombre,
                 telefono=r.telefono,
                 vacante=r.vacante,
