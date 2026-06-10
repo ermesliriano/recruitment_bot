@@ -39,6 +39,9 @@ class LlmEvaluationPayload(BaseModel):
     cv_score_0_10: float = Field(ge=0, le=10)
     recommendation: str
 
+    # Nombre completo del candidato extraído del CV (o null si no aparece).
+    candidate_full_name: str | None = None
+
     # Preguntas de la vacante que el LLM ha podido responder desde el CV.
     answered_vacancy_questions: list[CvInferredAnswer] = Field(default_factory=list)
 
@@ -65,6 +68,7 @@ Devuelve EXCLUSIVAMENTE JSON válido con esta estructura exacta:
   "red_flags": [],
   "cv_score_0_10": 0,
   "recommendation": "",
+  "candidate_full_name": null,
   "answered_vacancy_questions": [
     {{
       "vacancy_question_id": "",
@@ -82,6 +86,7 @@ Devuelve EXCLUSIVAMENTE JSON válido con esta estructura exacta:
 Reglas generales:
 - cv_score_0_10 debe ser un número entre 0 y 10.
 - recommendation debe ser exactamente uno de: "muy_idoneo", "idoneo", "revisar" o "no_idoneo".
+- candidate_full_name debe ser el nombre y apellidos del candidato tal como aparecen en el CV, o null si no puede determinarse con seguridad.
 - No añadas markdown, backticks ni texto fuera del JSON.
 
 Reglas sobre respuestas genéricas del candidato:

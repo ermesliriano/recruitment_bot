@@ -245,6 +245,7 @@ class RecruiterCvIntakeService:
 
         application = self.db.execute(select(Application).where(Application.id == application.id)).scalar_one()
         session = self.db.execute(select(type(session)).where(type(session).id == session.id)).scalar_one()
+        candidate = self.db.execute(select(Candidate).where(Candidate.id == candidate.id)).scalar_one()
 
         item.candidate_id = candidate.id
         item.application_id = application.id
