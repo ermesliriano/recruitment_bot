@@ -238,10 +238,14 @@ class RecruitmentService:
         if session.state_payload.get("pending_cv_confirm"):
             return self._handle_cv_confirmation(db, tenant, session, event, background_tasks)
 
+        if session.state_payload.get("cv_reading"):
+            return [{"text": "Sigo leyendo tu CV. En cuanto termine continúo contigo, dame un momento."}]
+
         if (
             event.attachments
             and session.application_id
             and not session.state_payload.get("cv_received")
+            and not session.state_payload.get("pending_name_confirm")
             and session.current_state in {ChatState.CAPTURE_NAME, ChatState.ASK_TENANT_QUESTIONS}
         ):
             return self._handle_proactive_cv(db, tenant, session, event)
@@ -389,11 +393,30 @@ class RecruitmentService:
         return [{"text": f"Has seleccionado: *{vacancy.title}*\n\n¿Cuál es tu nombre y apellido?"}]
 
     def _handle_capture_name(self, db, tenant, session, event):
+        # Paso de confirmación: ya preguntamos el nombre y esperamos sí/no.
+        pending_name = session.state_payload.get("pending_name_confirm")
+        if pending_name:
+            answer = norm(event.text)
+            if answer in {"si", "sí", "s", "yes", "ok", "vale", "correcto", "exacto"}:
+                session.state_payload = {k: v for k, v in session.state_payload.items() if k != "pending_name_confirm"}
+                return self._finish_capture_name(db, tenant, session, pending_name)
+            if answer in {"no", "n", "incorrecto"}:
+                session.state_payload = {k: v for k, v in session.state_payload.items() if k != "pending_name_confirm"}
+                return [{"text": "De acuerdo. ¿Cuál es tu nombre y apellido?"}]
+            return [{"text": f"¿Me puedes confirmar que {pending_name} es tu nombre? Responde *sí* o *no*."}]
+
+        # Captura inicial del nombre.
         if not event.text or len(event.text.strip()) < 3:
             return self._invalid(session, "Indica tu nombre completo (mínimo 3 caracteres).")
 
+        name = event.text.strip()
+        session.state_payload = {**session.state_payload, "pending_name_confirm": name}
+        session.invalid_input_count = 0
+        return [{"text": f"¿Me puedes confirmar que {name} es tu nombre? Responde *sí* o *no*."}]
+
+    def _finish_capture_name(self, db, tenant, session, name: str) -> list[dict]:
         candidate = db.execute(select(Candidate).where(Candidate.id == session.candidate_id)).scalar_one()
-        candidate.full_name = event.text.strip()
+        candidate.full_name = name
 
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
         app.status = ApplicationStatus.IN_PROGRESS
@@ -410,7 +433,7 @@ class RecruitmentService:
             session.state_payload = {**session.state_payload, "tenant_question_index": 0}
             self._transition(session, ChatState.ASK_TENANT_QUESTIONS)
             return [
-                {"text": f"Gracias, {candidate.full_name}. Antes de tu CV necesito hacerte unas preguntas."},
+                {"text": f"Gracias, {candidate.full_name}. Antes de continuar necesito hacerte unas preguntas."},
                 *self._ask_next_tenant_question(db, tenant, session),
             ]
 
@@ -615,13 +638,14 @@ class RecruitmentService:
 
         payload["cv_received"] = True
         payload["cv_document_id"] = cv_id
+        payload["cv_reading"] = True
         session.state_payload = payload
         app = db.execute(select(Application).where(Application.id == session.application_id)).scalar_one()
-        background_tasks.add_task(self.run_cv_pipeline_async, tenant.id, app.id, cv_id, False)
-        return [
-            {"text": "¡Gracias! Estoy leyendo tu CV en segundo plano. Seguimos con el proceso mientras tanto."},
-            *self._resume_current_state(db, tenant, session),
-        ]
+        background_tasks.add_task(self.run_cv_pipeline_async, tenant.id, app.id, cv_id, False, True)
+        return [{"text": (
+            "¡Gracias! Estoy leyendo tu CV. En cuanto termine continúo contigo "
+            "con las preguntas. Dame un momento, por favor."
+        )}]
 
     def _resume_current_state(self, db, tenant, session):
         """Re-formula la pregunta del estado actual tras confirmar/descartar el CV."""
@@ -643,6 +667,21 @@ class RecruitmentService:
             return self._ask_next_question(db, app, session)
         self._transition(session, ChatState.REQUEST_CV)
         return [{"text": "Ahora envíame tu CV en PDF, JPG o PNG (máx. 20 MB)."}]
+
+    def _resume_inbound_after_cv(self, db, tenant, app, session) -> list[dict]:
+        """Reanuda el flujo inbound tras leer un CV enviado proactivamente.
+        Si el CV aportó el nombre, salta la pregunta del nombre; si no, lo pide.
+        """
+        candidate = db.execute(select(Candidate).where(Candidate.id == session.candidate_id)).scalar_one()
+        session.state_payload = {
+            k: v for k, v in session.state_payload.items()
+            if k not in {"cv_reading", "pending_name_confirm"}
+        }
+
+        if session.current_state == ChatState.CAPTURE_NAME and not (candidate.full_name or "").strip():
+            return [{"text": "Para continuar, ¿cuál es tu nombre y apellido?"}]
+
+        return self._start_screening(db, tenant, session, app)
 
     # ── Métodos de preguntas genéricas de tenant ───────────────────────────
 
@@ -1312,7 +1351,7 @@ class RecruitmentService:
                 log_event(db=db, level="ERROR", source="cv_pipeline", event="MSG_SEND_FAILED",
                           message=str(send_exc), application_id=session.application_id)
 
-    def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id, dispatch_messages: bool = True):
+    def run_cv_pipeline_async(self, tenant_id, application_id, cv_document_id, dispatch_messages: bool = True, resume_inbound: bool = False):
         with SessionLocal() as db:
             log_event(db=db, level="INFO", source="cv_pipeline", event="PIPELINE_START",
                       tenant_id=tenant_id, application_id=application_id)
@@ -1408,7 +1447,18 @@ class RecruitmentService:
                     ai_eval.attempts += 1
                     log_event(db=db, level="ERROR", source="cv_pipeline", event="LLM_FAILED",
                               message=str(exc), exc=exc, application_id=app.id)
+                    if resume_inbound:
+                        outgoing = self._resume_inbound_after_cv(db, tenant, app, session)
+                        db.commit()
+                        self._send_session_messages(db, tenant, session, outgoing)
+                        return
                     db.commit()
+                    return
+
+                if resume_inbound:
+                    outgoing = self._resume_inbound_after_cv(db, tenant, app, session)
+                    db.commit()
+                    self._send_session_messages(db, tenant, session, outgoing)
                     return
 
                 if dispatch_messages and session.current_state == ChatState.SCORING:
