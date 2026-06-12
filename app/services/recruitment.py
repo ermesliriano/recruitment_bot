@@ -410,19 +410,51 @@ class RecruitmentService:
         if not vacancy:
             return self._invalid(session, "La vacante ya no está disponible.")
 
-        application = Application(
-            tenant_id=tenant.id,
-            candidate_id=session.candidate_id,
-            vacancy_id=vacancy.id,
-            status=ApplicationStatus.DRAFT,
-        )
-        db.add(application)
-        db.flush()
+        # Evitar candidaturas duplicadas: un candidato no puede aplicar dos veces
+        # a la misma vacante. Si ya existe, la reutilizamos (o avisamos si ya se
+        # evaluó) en lugar de crear una nueva.
+        existing = db.execute(
+            select(Application)
+            .where(
+                Application.tenant_id == tenant.id,
+                Application.candidate_id == session.candidate_id,
+                Application.vacancy_id == vacancy.id,
+            )
+            .order_by(Application.created_at.desc())
+        ).scalars().first()
+
+        completed_statuses = {
+            ApplicationStatus.REVIEW,
+            ApplicationStatus.INTERVIEW,
+            ApplicationStatus.SHORTLIST,
+            ApplicationStatus.REJECTED,
+        }
+
+        if existing and existing.status in completed_statuses:
+            session.state_payload = {"vacancies_shown": False}
+            return [{"text": (
+                f"Ya tienes una candidatura registrada para *{vacancy.title}*, así que no la dupliquemos. "
+                "Nuestro equipo de RRHH la revisará y te contactará. "
+                "Si quieres postular a otra vacante, escribe /start."
+            )}]
+
+        if existing:
+            application = existing
+        else:
+            application = Application(
+                tenant_id=tenant.id,
+                candidate_id=session.candidate_id,
+                vacancy_id=vacancy.id,
+                status=ApplicationStatus.DRAFT,
+            )
+            db.add(application)
+            db.flush()
 
         session.application_id = application.id
         session.state_payload = {"vacancy_id": str(vacancy.id), "question_index": 0}
         self._transition(session, ChatState.CAPTURE_NAME)
-        return [{"text": f"Has seleccionado: *{vacancy.title}*\n\n¿Cuál es tu nombre y apellido?"}]
+        prefix = "Retomamos tu candidatura para" if existing else "Has seleccionado:"
+        return [{"text": f"{prefix} *{vacancy.title}*\n\n¿Cuál es tu nombre y apellido?"}]
 
     def _handle_capture_name(self, db, tenant, session, event):
         # Paso de confirmación: ya preguntamos el nombre y esperamos sí/no.

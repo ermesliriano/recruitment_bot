@@ -337,16 +337,17 @@ class RecruiterCvIntakeService:
         return candidate, False
 
     def _get_or_reuse_application(self, *, tenant_id: str, candidate_id: str, vacancy_id: str) -> tuple[Application, bool]:
+        # Un candidato no puede tener más de una candidatura para la misma vacante:
+        # reutilizamos cualquier candidatura existente (independientemente del estado).
         application = self.db.execute(
             select(Application)
             .where(
                 Application.tenant_id == tenant_id,
                 Application.candidate_id == candidate_id,
                 Application.vacancy_id == vacancy_id,
-                Application.status.in_(OPEN_APPLICATION_STATUSES),
             )
             .order_by(desc(Application.updated_at))
-        ).scalar_one_or_none()
+        ).scalars().first()
 
         if application:
             return application, True
