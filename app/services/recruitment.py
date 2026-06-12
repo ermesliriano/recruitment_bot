@@ -329,6 +329,41 @@ class RecruitmentService:
             "reply_markup": TelegramGateway.vacancy_keyboard([(str(v.id), v.title) for v in vacancies]),
         }]
 
+    @staticmethod
+    def _attachment_kind(event: IncomingMessageEvent) -> str | None:
+        """Clasifica el adjunto entrante: 'audio', 'image', 'video', 'file' o None."""
+        if not event.attachments:
+            return None
+        mime = (event.attachments[0].mime_type or "").lower()
+        if mime.startswith("audio/"):
+            return "audio"
+        if mime.startswith("image/"):
+            return "image"
+        if mime.startswith("video/"):
+            return "video"
+        return "file"
+
+    def _vacancy_redirect(self, session) -> str:
+        if session.platform == Platform.WHATSAPP:
+            return "Para elegir, responde con el número de la vacante de la lista (por ejemplo, 1)."
+        return "Para elegir, pulsa una de las vacantes de la lista."
+
+    def _unrecognized_vacancy_message(self, session, event: IncomingMessageEvent) -> str:
+        kind = self._attachment_kind(event)
+        if kind == "audio":
+            feedback = "He recibido una nota de audio, pero no puedo escucharla por aquí."
+        elif kind == "image":
+            feedback = "He recibido una imagen, pero no me sirve para identificar la vacante."
+        elif kind == "video":
+            feedback = "He recibido un vídeo, pero no me sirve para identificar la vacante."
+        elif kind == "file":
+            feedback = "He recibido un archivo, pero todavía no toca enviar documentos."
+        elif event.text:
+            feedback = "No reconocí esa vacante entre las opciones."
+        else:
+            feedback = "No he podido interpretar tu mensaje."
+        return f"{feedback} {self._vacancy_redirect(session)}"
+
     def _handle_select_vacancy(self, db, tenant, session, event):
         choices = db.execute(
             select(Vacancy.id, Vacancy.title)
@@ -362,10 +397,7 @@ class RecruitmentService:
                         break
 
         if not vacancy_id:
-            return self._invalid(
-                session,
-                "No reconocí esa vacante. " + self._reply_hint(session),
-            )
+            return self._invalid(session, self._unrecognized_vacancy_message(session, event))
 
         vacancy = db.execute(
             select(Vacancy).where(
