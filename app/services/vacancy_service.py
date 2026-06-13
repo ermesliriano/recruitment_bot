@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.enums import VacancyStatus
 from app.models.vacancy import Vacancy
+from app.models.tenant import Tenant
 from app.models.question import Question, VacancyQuestion
 from app.models.scoring_rule import ScoringRule
 from app.schemas.vacancy import VacancyCreate, VacancyQuestionCreate, VacancyQuestionUpdate, VacancyUpdate
@@ -25,10 +26,21 @@ class VacancyService:
     # ── CRUD vacantes ──────────────────────────────────────────────────────
 
     def list_vacancies(self, tenant_id: str | None = None) -> list[Vacancy]:
-        stmt = select(Vacancy).where(Vacancy.deleted_at.is_(None))
+        stmt = (
+            select(Vacancy, Tenant.name)
+            .outerjoin(Tenant, Tenant.id == Vacancy.tenant_id)
+            .where(Vacancy.deleted_at.is_(None))
+        )
         if tenant_id:
             stmt = stmt.where(Vacancy.tenant_id == tenant_id)
-        return self.db.execute(stmt).scalars().all()
+
+        vacancies: list[Vacancy] = []
+        for vacancy, tenant_name in self.db.execute(stmt).all():
+            # Atributo transitorio (no persistido) para que VacancyOut serialice
+            # el nombre del tenant junto a cada vacante, sin un endpoint extra.
+            vacancy.tenant_name = tenant_name
+            vacancies.append(vacancy)
+        return vacancies
 
     def get_vacancy(self, vacancy_id: str, tenant_id: str | None = None) -> Vacancy:
         stmt = select(Vacancy).where(Vacancy.id == vacancy_id, Vacancy.deleted_at.is_(None))

@@ -44,6 +44,7 @@ class VacancyOut(VacancyBase):
     id: UUID
     code: str
     tenant_id: UUID
+    tenant_name: str | None = None
     status: VacancyStatus
 
     model_config = {"from_attributes": True}
