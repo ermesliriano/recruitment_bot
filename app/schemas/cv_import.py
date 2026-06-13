@@ -27,6 +27,10 @@ class CvImportItemOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ResolvePhoneIn(BaseModel):
+    phone: str
+
+
 class CvImportJobOut(BaseModel):
     id: UUID
     tenant_id: UUID

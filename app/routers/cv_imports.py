@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.security import require_admin_token
 from app.models.cv_import import CvImportJobItem
-from app.schemas.cv_import import CvImportJobOut, CvImportItemOut
+from app.schemas.cv_import import CvImportJobOut, CvImportItemOut, ResolvePhoneIn
 from app.services.recruiter_cv_intake import ImportedCvFile, RecruiterCvIntakeService
 
 router = APIRouter(
@@ -102,5 +102,25 @@ def retry_outbound_message(
     service = RecruiterCvIntakeService(db)
     try:
         return service.retry_outbound(tenant_id=tenant_id, job_id=job_id, item_id=item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/{job_id}/items/{item_id}/resolve-phone", response_model=CvImportItemOut)
+def resolve_phone(
+    tenant_id: str,
+    job_id: str,
+    item_id: str,
+    payload: ResolvePhoneIn,
+    db: Session = Depends(get_db),
+):
+    service = RecruiterCvIntakeService(db)
+    try:
+        return service.resolve_phone(
+            tenant_id=tenant_id,
+            job_id=job_id,
+            item_id=item_id,
+            manual_phone=payload.phone,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
+import phonenumbers
 from sqlalchemy import desc, select
 
 from app.cv_pipeline import extract_cv_text, get_storage, next_cv_version, sha256_bytes, validate_cv
@@ -157,6 +159,92 @@ class RecruiterCvIntakeService:
         self.db.refresh(item)
         return item
 
+    def resolve_phone(self, *, tenant_id: str, job_id: str, item_id: str, manual_phone: str) -> CvImportJobItem:
+        tenant = self.db.execute(
+            select(Tenant).where(Tenant.id == tenant_id, Tenant.is_active.is_(True))
+        ).scalar_one()
+
+        item = self.db.execute(
+            select(CvImportJobItem).where(
+                CvImportJobItem.id == item_id,
+                CvImportJobItem.job_id == job_id,
+                CvImportJobItem.tenant_id == tenant_id,
+            )
+        ).scalar_one()
+
+        if item.status not in ("phone_not_found", "ambiguous_phone"):
+            raise ValueError("El ítem no está pendiente por teléfono no detectado.")
+
+        if not item.raw_content:
+            raise ValueError(
+                "No se conserva el contenido del CV para reprocesar este ítem; vuelve a subir el fichero."
+            )
+
+        phone_e164 = self._normalize_manual_phone(manual_phone)
+
+        job = self.db.execute(
+            select(CvImportJob).where(CvImportJob.id == job_id, CvImportJob.tenant_id == tenant_id)
+        ).scalar_one()
+        vacancy = self.db.execute(
+            select(Vacancy).where(Vacancy.id == job.vacancy_id, Vacancy.tenant_id == tenant_id)
+        ).scalar_one()
+
+        imported_file = ImportedCvFile(
+            filename=item.original_filename,
+            mime_type=item.mime_type or "application/octet-stream",
+            content=bytes(item.raw_content),
+        )
+
+        ext = validate_cv(imported_file.filename, imported_file.mime_type, imported_file.size_bytes)
+        extracted_text, parse_status = extract_cv_text(ext, imported_file.content)
+
+        item.extraction_status = parse_status.value if hasattr(parse_status, "value") else str(parse_status)
+        item.extracted_preview = (extracted_text or "")[:2000]
+        item.phone_confidence = Decimal("1.00")
+        item.phone_candidates_json = {
+            "selected_phone": phone_e164,
+            "confidence": 1.0,
+            "status": "manual",
+            "reason": "Teléfono introducido manualmente por el reclutador.",
+            "candidates": [],
+        }
+
+        self._continue_processing(
+            job=job,
+            item=item,
+            tenant=tenant,
+            vacancy=vacancy,
+            imported_file=imported_file,
+            ext=ext,
+            extracted_text=extracted_text,
+            parse_status=parse_status,
+            phone_e164=phone_e164,
+        )
+
+        job.summary_json = self._refresh_job_summary(job_id)
+        self.db.commit()
+        self.db.refresh(item)
+        return item
+
+    def _refresh_job_summary(self, job_id: str) -> dict[str, Any]:
+        items = self.db.execute(
+            select(CvImportJobItem).where(CvImportJobItem.job_id == job_id)
+        ).scalars().all()
+        return self._build_summary(items)
+
+    @staticmethod
+    def _normalize_manual_phone(raw: str) -> str:
+        value = (raw or "").strip()
+        if not value:
+            raise ValueError("Debes indicar un número de teléfono.")
+        try:
+            parsed = phonenumbers.parse(value, "ES")
+        except phonenumbers.NumberParseException:
+            raise ValueError("El número de teléfono no es válido.")
+        if not phonenumbers.is_valid_number(parsed):
+            raise ValueError("El número de teléfono no es válido.")
+        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+
     def _process_one_file(self, *, job: CvImportJob, item: CvImportJobItem, tenant, vacancy, imported_file: ImportedCvFile) -> None:
         ext = validate_cv(imported_file.filename, imported_file.mime_type, imported_file.size_bytes)
         extracted_text, parse_status = extract_cv_text(ext, imported_file.content)
@@ -168,18 +256,44 @@ class RecruiterCvIntakeService:
         item.phone_candidates_json = phone_result.as_dict()
         item.phone_confidence = phone_result.confidence
 
-        if phone_result.status == "phone_not_found":
-            item.status = "phone_not_found"
+        if phone_result.status in ("phone_not_found", "ambiguous_phone"):
+            item.status = phone_result.status
             item.error_message = phone_result.reason
-            return
-
-        if phone_result.status == "ambiguous_phone":
-            item.status = "ambiguous_phone"
-            item.error_message = phone_result.reason
+            # Conservamos el binario original del CV para poder reanudar el
+            # procesado cuando el reclutador introduzca el teléfono manualmente.
+            item.raw_content = imported_file.content
             return
 
         phone_e164 = phone_result.selected_phone
+        self._continue_processing(
+            job=job,
+            item=item,
+            tenant=tenant,
+            vacancy=vacancy,
+            imported_file=imported_file,
+            ext=ext,
+            extracted_text=extracted_text,
+            parse_status=parse_status,
+            phone_e164=phone_e164,
+        )
+
+    def _continue_processing(
+        self,
+        *,
+        job: CvImportJob,
+        item: CvImportJobItem,
+        tenant,
+        vacancy,
+        imported_file: ImportedCvFile,
+        ext: str,
+        extracted_text: str,
+        parse_status,
+        phone_e164: str,
+    ) -> None:
         item.detected_phone_e164 = phone_e164
+        item.error_message = None
+        # Una vez reanudado el procesado ya no necesitamos conservar el binario.
+        item.raw_content = None
 
         candidate, candidate_reused = self._get_or_create_candidate(tenant_id=str(tenant.id), phone_e164=phone_e164)
         application, application_reused = self._get_or_reuse_application(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Integer, Numeric, String, Text, text
+from sqlalchemy import Boolean, DateTime, Integer, LargeBinary, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -44,6 +44,7 @@ class CvImportJobItem(Base):
     phone_confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     phone_candidates_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     extracted_preview: Mapped[str | None] = mapped_column(Text)
+    raw_content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     candidate_reused: Mapped[bool] = mapped_column(Boolean, default=False)
     application_reused: Mapped[bool] = mapped_column(Boolean, default=False)
     error_message: Mapped[str | None] = mapped_column(Text)
