@@ -1,6 +1,6 @@
 -- seeds/mock_data.sql
 truncate table tenant_questions, tenants, vacancies, questions, vacancy_questions, candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, scoring_rules, system_logs, outbound_messages, cv_import_jobs, cv_import_job_items;
-truncate table candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, system_logs;
+truncate table cv_import_job_items, outbound_messages, candidates, applications, answers, cv_documents, ai_evaluations, conversation_sessions, system_logs;
  
 INSERT INTO tenants (
   id, slug, name, hr_email, telegram_bot_token, telegram_webhook_secret, settings_json, is_active, whatsapp_enabled, whatsapp_use_env_credentials, whatsapp_messaging_service_sid, whatsapp_sender_address, whatsapp_initial_template_sid, whatsapp_initial_template_language, whatsapp_assume_opt_in
@@ -236,7 +236,7 @@ INSERT INTO vacancies (
   id, tenant_id, code, title, description, responsibilities,
   mandatory_requirements, desirable_requirements,
   salary_text, schedule_text, location_text, benefits,
-  faq_context, cv_score_factor, classification_thresholds, status
+  faq_context, cv_max_score, classification_thresholds, status
 ) VALUES (
   '22222222-2222-2222-2222-222222222303',
   '11111111-1111-1111-1111-111111111111',
@@ -291,9 +291,9 @@ INSERT INTO vacancies (
       }
     ]
   }'::jsonb,
-  6.00,
+  40,
   '{"review":35,"interview":60,"shortlist":75}'::jsonb,
-  'ACTIVE'
+  'DRAFT'
 );
 
 

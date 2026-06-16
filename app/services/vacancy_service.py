@@ -5,13 +5,14 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.enums import VacancyStatus
 from app.models.vacancy import Vacancy
 from app.models.tenant import Tenant
+from app.models.application import Application
 from app.models.question import Question, VacancyQuestion
 from app.models.scoring_rule import ScoringRule
 from app.schemas.vacancy import VacancyCreate, VacancyQuestionCreate, VacancyQuestionUpdate, VacancyUpdate
@@ -26,8 +27,32 @@ class VacancyService:
     # ── CRUD vacantes ──────────────────────────────────────────────────────
 
     def list_vacancies(self, tenant_id: str | None = None) -> list[Vacancy]:
+        # Suma de puntos máximos de las preguntas activas de cada vacante.
+        questions_points_sq = (
+            select(func.coalesce(func.sum(VacancyQuestion.max_points), 0))
+            .where(
+                VacancyQuestion.vacancy_id == Vacancy.id,
+                VacancyQuestion.is_active.is_(True),
+            )
+            .correlate(Vacancy)
+            .scalar_subquery()
+        )
+        # Número de candidaturas registradas para cada vacante (mismo criterio que
+        # el ranking, que cuenta todas las applications de la vacante).
+        applications_count_sq = (
+            select(func.count(Application.id))
+            .where(Application.vacancy_id == Vacancy.id)
+            .correlate(Vacancy)
+            .scalar_subquery()
+        )
+
         stmt = (
-            select(Vacancy, Tenant.name)
+            select(
+                Vacancy,
+                Tenant.name,
+                questions_points_sq.label("questions_total_points"),
+                applications_count_sq.label("applications_count"),
+            )
             .outerjoin(Tenant, Tenant.id == Vacancy.tenant_id)
             .where(Vacancy.deleted_at.is_(None))
         )
@@ -35,10 +60,12 @@ class VacancyService:
             stmt = stmt.where(Vacancy.tenant_id == tenant_id)
 
         vacancies: list[Vacancy] = []
-        for vacancy, tenant_name in self.db.execute(stmt).all():
-            # Atributo transitorio (no persistido) para que VacancyOut serialice
-            # el nombre del tenant junto a cada vacante, sin un endpoint extra.
+        for vacancy, tenant_name, questions_total_points, applications_count in self.db.execute(stmt).all():
+            # Atributos transitorios (no persistidos) para que VacancyOut serialice
+            # el nombre del tenant y los agregados junto a cada vacante, sin endpoints extra.
             vacancy.tenant_name = tenant_name
+            vacancy.questions_total_points = int(questions_total_points or 0)
+            vacancy.applications_count = int(applications_count or 0)
             vacancies.append(vacancy)
         return vacancies
 

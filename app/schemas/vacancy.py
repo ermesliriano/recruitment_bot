@@ -1,6 +1,7 @@
 # app/schemas/vacancy.py
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -46,6 +47,12 @@ class VacancyOut(VacancyBase):
     tenant_id: UUID
     tenant_name: str | None = None
     status: VacancyStatus
+    created_at: datetime | None = None
+    # Agregados calculados en list_vacancies (atributos transitorios sobre el ORM).
+    # Tienen default para que los endpoints que devuelven la vacante sin estos
+    # cálculos (create/update/status/get) no fallen al serializar.
+    questions_total_points: int = 0
+    applications_count: int = 0
 
     model_config = {"from_attributes": True}
 
