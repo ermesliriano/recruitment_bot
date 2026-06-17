@@ -1,7 +1,6 @@
 # app/schemas/application.py
 from __future__ import annotations
 
-from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -9,11 +8,38 @@ from pydantic import BaseModel
 from app.enums import ApplicationOrigin, ApplicationStatus, Classification, Platform
 
 
+class ApplicationAnswerOut(BaseModel):
+    """Una respuesta dada por el candidato, ya resuelta a texto legible."""
+    question_order: int | None = None
+    prompt: str
+    field_key: str
+    answer: str | None = None
+    scope: str  # "vacancy" | "tenant" | "other"
+
+
+class OtherApplicationOut(BaseModel):
+    """Otra candidatura del mismo candidato dentro de la empresa."""
+    application_id: UUID
+    vacancy_id: UUID
+    vacancy_title: str | None = None
+    status: ApplicationStatus
+    classification: Classification | None = None
+    score_total: float | None = None
+
+
 class ApplicationOut(BaseModel):
     id: UUID
+
     tenant_id: UUID
+    tenant_name: str | None = None
+
     candidate_id: UUID
+    candidate_full_name: str | None = None
+    candidate_phone: str | None = None
+
     vacancy_id: UUID
+    vacancy_title: str | None = None
+
     status: ApplicationStatus
     classification: Classification | None = None
     score_rules: float
@@ -25,7 +51,13 @@ class ApplicationOut(BaseModel):
     preferred_platform: Platform | None = None
     last_outbound_status: str | None = None
     last_outbound_channel: Platform | None = None
-    last_outbound_template_sid: str | None = None
-    latest_cv: dict[str, Any] | None = None
+
+    # Salida legible del análisis del CV (LLM) y transcripción del CV.
+    recommendation: str | None = None
+    cv_extracted_text: str | None = None
+
+    # Respuestas del candidato y otras candidaturas dentro de la empresa.
+    answers: list[ApplicationAnswerOut] = []
+    other_applications: list[OtherApplicationOut] = []
 
     model_config = {"from_attributes": True}
