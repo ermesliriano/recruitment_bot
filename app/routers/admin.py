@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 
 from app.core.db import get_db
 from app.core.security import require_admin_token
-from app.enums import Classification
+from app.enums import AiEvalStatus, Classification
 from app.models.application import Application, Answer
 from app.models.candidate import Candidate
 from app.models.cv import CvDocument, AiEvaluation
@@ -125,15 +125,32 @@ def application_detail(tenant_id: str, application_id: str, db: Session = Depend
         .order_by(OutboundMessage.created_at.desc())
     ).scalars().first()
 
-    # Recomendación del LLM: última evaluación que realmente trae texto.
+    # Última evaluación correcta del LLM: de ahí salen recommendation y el análisis cualitativo.
     latest_eval = db.execute(
         select(AiEvaluation)
         .where(
             AiEvaluation.application_id == application.id,
-            AiEvaluation.recommendation.is_not(None),
+            AiEvaluation.status == AiEvalStatus.SUCCESS,
         )
         .order_by(AiEvaluation.created_at.desc())
     ).scalars().first()
+
+    analysis = None
+    if latest_eval is not None:
+        parsed = latest_eval.parsed_json or {}
+        analysis = {
+            "human_readable_summary": parsed.get("human_readable_summary"),
+            "qualitative_assessment": parsed.get("qualitative_assessment"),
+            "score_rationale": parsed.get("score_rationale"),
+            "recommended_next_action": parsed.get("recommended_next_action"),
+            "skills": parsed.get("skills") or (latest_eval.skills or []),
+            "experience_summary": parsed.get("experience_summary")
+            or (latest_eval.experience_summary or []),
+            "red_flags": parsed.get("red_flags") or (latest_eval.red_flags or []),
+            "missing_evidence": parsed.get("missing_evidence") or [],
+            "fit_gaps": parsed.get("fit_gaps") or [],
+            "follow_up_questions": parsed.get("follow_up_questions") or [],
+        }
 
     # ── Respuestas del candidato, resueltas a texto legible ──────────────────
     vq = aliased(VacancyQuestion)
@@ -248,6 +265,7 @@ def application_detail(tenant_id: str, application_id: str, db: Session = Depend
         "last_outbound_channel": latest_outbound.channel if latest_outbound else None,
         "recommendation": latest_eval.recommendation if latest_eval else None,
         "cv_extracted_text": latest_cv.extracted_text if latest_cv else None,
+        "analysis": analysis,
         "answers": answers,
         "other_applications": other_applications,
     }

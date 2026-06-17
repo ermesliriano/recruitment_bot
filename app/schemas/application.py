@@ -27,6 +27,20 @@ class OtherApplicationOut(BaseModel):
     score_total: float | None = None
 
 
+class CvAnalysisOut(BaseModel):
+    """Salida cualitativa del análisis del CV (LLM), para mostrar en el detalle."""
+    human_readable_summary: str | None = None
+    qualitative_assessment: str | None = None
+    score_rationale: str | None = None
+    recommended_next_action: str | None = None
+    skills: list[str] = []
+    experience_summary: list[str] = []
+    red_flags: list[str] = []
+    missing_evidence: list[str] = []
+    fit_gaps: list[str] = []
+    follow_up_questions: list[str] = []
+
+
 class ApplicationOut(BaseModel):
     id: UUID
 
@@ -55,6 +69,7 @@ class ApplicationOut(BaseModel):
     # Salida legible del análisis del CV (LLM) y transcripción del CV.
     recommendation: str | None = None
     cv_extracted_text: str | None = None
+    analysis: CvAnalysisOut | None = None
 
     # Respuestas del candidato y otras candidaturas dentro de la empresa.
     answers: list[ApplicationAnswerOut] = []

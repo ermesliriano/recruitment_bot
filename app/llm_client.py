@@ -5,9 +5,38 @@ import time
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.core.config import settings
+
+
+# Límite de caracteres para todos los campos de texto libre devueltos por el LLM.
+# Se aplica como instrucción en el prompt y, de forma defensiva, al validar el payload.
+MAX_FREE_TEXT_CHARS = 200
+
+
+def _clip_text(value: Any) -> str | None:
+    """Recorta un campo de texto libre a MAX_FREE_TEXT_CHARS. Devuelve None si queda vacío."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:MAX_FREE_TEXT_CHARS]
+
+
+def _clip_str_list(value: Any) -> list[str]:
+    """Normaliza una lista de strings: aplana dicts, descarta vacíos y recorta a 200 chars."""
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            item = " - ".join(str(v) for v in item.values() if v)
+        text = str(item).strip()
+        if text:
+            out.append(text[:MAX_FREE_TEXT_CHARS])
+    return out
 
 
 # ── Modelos de respuesta ───────────────────────────────────────────────────────
@@ -36,8 +65,20 @@ class LlmEvaluationPayload(BaseModel):
     experience_summary: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     red_flags: list[str] = Field(default_factory=list)
+
+    # Campos cualitativos añadidos al análisis.
+    missing_evidence: list[str] = Field(default_factory=list)
+    fit_gaps: list[str] = Field(default_factory=list)
+    follow_up_questions: list[str] = Field(default_factory=list)
+
     cv_score_0_10: float = Field(ge=0, le=10)
     recommendation: str
+
+    # Textos cualitativos (cada uno limitado a 200 caracteres).
+    recommended_next_action: str | None = None
+    human_readable_summary: str | None = None
+    qualitative_assessment: str | None = None
+    score_rationale: str | None = None
 
     # Nombre completo del candidato extraído del CV (o null si no aparece).
     candidate_full_name: str | None = None
@@ -47,11 +88,35 @@ class LlmEvaluationPayload(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    @field_validator(
+        "experience_summary",
+        "skills",
+        "red_flags",
+        "missing_evidence",
+        "fit_gaps",
+        "follow_up_questions",
+        mode="before",
+    )
+    @classmethod
+    def _clip_lists(cls, value: Any) -> list[str]:
+        return _clip_str_list(value)
+
+    @field_validator(
+        "recommended_next_action",
+        "human_readable_summary",
+        "qualitative_assessment",
+        "score_rationale",
+        mode="before",
+    )
+    @classmethod
+    def _clip_texts(cls, value: Any) -> str | None:
+        return _clip_text(value)
+
 
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 PROMPT_TEMPLATE = """
-Eres un evaluador técnico de CV para procesos de reclutamiento.
+Eres un evaluador técnico de CV para procesos de reclutamiento. Tu función es analizar la compatibilidad del candidato con una vacante específica, diferenciando claramente entre información evidenciada en el CV, información declarada por el candidato, información no evidenciada y brechas reales frente al perfil requerido.
 
 Analiza el CV en relación con la vacante indicada.
 
@@ -66,8 +131,14 @@ Devuelve EXCLUSIVAMENTE JSON válido con esta estructura exacta:
   "experience_summary": [],
   "skills": [],
   "red_flags": [],
+  "missing_evidence": [],
+  "fit_gaps": [],
   "cv_score_0_10": 0,
   "recommendation": "",
+  "recommended_next_action": "",
+  "human_readable_summary": "",
+  "qualitative_assessment": "",
+  "score_rationale": "",
   "candidate_full_name": null,
   "answered_vacancy_questions": [
     {{
@@ -80,7 +151,8 @@ Devuelve EXCLUSIVAMENTE JSON válido con esta estructura exacta:
       "evidence": null,
       "confidence": 0
     }}
-  ]
+  ],
+  "follow_up_questions": []
 }}
 
 Reglas generales:
@@ -88,12 +160,34 @@ Reglas generales:
 - recommendation debe ser exactamente uno de: "muy_idoneo", "idoneo", "revisar" o "no_idoneo".
 - candidate_full_name debe ser el nombre y apellidos del candidato tal como aparecen en el CV, o null si no puede determinarse con seguridad.
 - No añadas markdown, backticks ni texto fuera del JSON.
+- LÍMITE DE LONGITUD: todos los campos de texto libre (recommended_next_action, human_readable_summary, qualitative_assessment, score_rationale y cada elemento de experience_summary, skills, red_flags, missing_evidence, fit_gaps y follow_up_questions) NO pueden superar los 200 caracteres. Si necesitas resumir, hazlo para respetar ese límite.
+
+Definición de recommendation:
+- "muy_idoneo": el CV evidencia ajuste alto con la vacante y cumple la mayoría de requisitos obligatorios y deseables.
+- "idoneo": el CV evidencia buen ajuste con la vacante, aunque puede tener algunos puntos pendientes de validación.
+- "revisar": el CV muestra señales relevantes para la vacante, pero faltan datos críticos que deben validarse en entrevista o conversación.
+- "no_idoneo": el CV no muestra relación suficiente con la vacante o presenta brechas muy marcadas frente al perfil requerido.
+
+Guía para cv_score_0_10:
+- 9 a 10: perfil muy idóneo; evidencia directa de experiencia relevante y cumplimiento fuerte de requisitos.
+- 7 a 8.9: perfil idóneo; cumple varios criterios relevantes, aunque puede requerir validaciones puntuales.
+- 4 a 6.9: perfil a revisar; existen señales relevantes, pero faltan evidencias críticas que deben validarse.
+- 0 a 3.9: perfil no idóneo; baja relación con la vacante o brechas significativas.
 
 Reglas sobre respuestas genéricas del candidato:
 - Considéralas declaraciones explícitas del candidato.
-- Úsalas para enriquecer candidate_profile, experience_summary, red_flags y cv_score_0_10.
+- Úsalas para enriquecer candidate_profile, experience_summary, red_flags, missing_evidence, fit_gaps y cv_score_0_10.
 - Si alguna respuesta contradice el CV, prioriza la respuesta explícita del candidato y registra la inconsistencia en red_flags.
+- Cuando una respuesta genérica del candidato complemente el CV, úsala como declaración explícita, pero diferencia su origen dentro del análisis.
 - No las devuelvas dentro de answered_vacancy_questions.
+- Si la información proviene de una respuesta del candidato y no del CV, no debe marcarse como respondida dentro de answered_vacancy_questions, salvo que la pregunta de la vacante también esté evidenciada directamente en el CV.
+
+Diferencia entre red_flags, missing_evidence y fit_gaps:
+
+- red_flags: alertas negativas reales, tales como contradicciones, información inconsistente, datos dudosos, experiencia incompatible o elementos que puedan representar riesgo para el proceso.
+- missing_evidence: información importante para la vacante que no aparece en el CV ni en las respuestas genéricas del candidato.
+- fit_gaps: brechas reales entre el perfil del candidato y los requisitos de la vacante.
+- No incluyas como red_flag una información simplemente no evidenciada.
 
 Reglas para answered_vacancy_questions:
 - Debes devolver UNA entrada por cada pregunta recibida en "Preguntas asociadas a la vacante".
@@ -105,6 +199,23 @@ Reglas para answered_vacancy_questions:
 - Para answer_type="text", normalized_answer debe ser una respuesta breve y literal al CV.
 - No inventes información.
 - La evidencia debe ser un fragmento breve o resumen del CV que justifique la respuesta.
+
+Reglas para follow_up_questions:
+
+- Genera preguntas de seguimiento cuando existan requisitos importantes no evidenciados en el CV.
+- Las preguntas deben ser breves, directas y útiles para completar la evaluación.
+- No preguntes información que ya esté claramente respondida en el CV.
+- Prioriza preguntas relacionadas con requisitos obligatorios, disponibilidad, ubicación, experiencia específica, herramientas, movilidad, salario, horario o modalidad de trabajo.
+- Si no hacen falta preguntas adicionales, devuelve un arreglo vacío.
+
+Reglas para human_readable_summary, qualitative_assessment y score_rationale:
+
+- human_readable_summary debe ser un resumen ejecutivo de una o dos frases.
+- qualitative_assessment debe ser un párrafo claro, profesional y humano que explique el ajuste general del candidato frente a la vacante.
+- score_rationale debe explicar por qué se asignó el puntaje, mencionando fortalezas, brechas, información no evidenciada y elementos que influyeron en la recomendación.
+- No inventes logros, experiencia ni competencias.
+- Si el perfil tiene potencial pero no cumple completamente, indícalo de forma objetiva.
+- Recuerda el límite de 200 caracteres por campo de texto libre.
 
 Vacante:
 - Título: {title}
@@ -150,10 +261,15 @@ def _normalize_payload(obj: dict) -> dict:
             for e in exp
         ]
 
-    # Garantiza que answered_vacancy_questions siempre sea lista.
-    questions = obj.get("answered_vacancy_questions")
-    if not isinstance(questions, list):
-        obj["answered_vacancy_questions"] = []
+    # Garantiza que las listas cualitativas siempre sean listas.
+    for list_field in (
+        "answered_vacancy_questions",
+        "missing_evidence",
+        "fit_gaps",
+        "follow_up_questions",
+    ):
+        if not isinstance(obj.get(list_field), list):
+            obj[list_field] = []
 
     return obj
 
