@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.security import require_admin_token
+from app.models.candidate import Candidate
 from app.models.cv_import import CvImportJobItem
 from app.schemas.cv_import import CvImportJobOut, CvImportItemOut, ResolvePhoneIn
 from app.services.recruiter_cv_intake import ImportedCvFile, RecruiterCvIntakeService
@@ -15,6 +16,21 @@ router = APIRouter(
     tags=["CV imports"],
     dependencies=[Depends(require_admin_token)],
 )
+
+
+def _attach_candidate_names(db: Session, items) -> None:
+    """Resuelve candidate.full_name en bloque y lo adjunta como atributo transitorio."""
+    candidate_ids = {item.candidate_id for item in items if item.candidate_id}
+    names: dict = {}
+    if candidate_ids:
+        rows = db.execute(
+            select(Candidate.id, Candidate.full_name).where(
+                Candidate.id.in_(candidate_ids)
+            )
+        ).all()
+        names = {cid: full_name for cid, full_name in rows}
+    for item in items:
+        item.candidate_full_name = names.get(item.candidate_id)
 
 
 def _serialize_job(job) -> dict:
@@ -60,6 +76,7 @@ async def create_cv_import_job(
     job.items = db.execute(
         select(CvImportJobItem).where(CvImportJobItem.job_id == job.id)
     ).scalars().all()
+    _attach_candidate_names(db, job.items)
     return _serialize_job(job)
 
 
@@ -75,6 +92,7 @@ def list_cv_import_jobs(
         job.items = db.execute(
             select(CvImportJobItem).where(CvImportJobItem.job_id == job.id)
         ).scalars().all()
+        _attach_candidate_names(db, job.items)
     return [_serialize_job(job) for job in jobs]
 
 
@@ -89,6 +107,7 @@ def get_cv_import_job(
     job.items = db.execute(
         select(CvImportJobItem).where(CvImportJobItem.job_id == job.id)
     ).scalars().all()
+    _attach_candidate_names(db, job.items)
     return _serialize_job(job)
 
 
@@ -101,7 +120,9 @@ def retry_outbound_message(
 ):
     service = RecruiterCvIntakeService(db)
     try:
-        return service.retry_outbound(tenant_id=tenant_id, job_id=job_id, item_id=item_id)
+        item = service.retry_outbound(tenant_id=tenant_id, job_id=job_id, item_id=item_id)
+        _attach_candidate_names(db, [item])
+        return item
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -116,11 +137,13 @@ def resolve_phone(
 ):
     service = RecruiterCvIntakeService(db)
     try:
-        return service.resolve_phone(
+        item = service.resolve_phone(
             tenant_id=tenant_id,
             job_id=job_id,
             item_id=item_id,
             manual_phone=payload.phone,
         )
+        _attach_candidate_names(db, [item])
+        return item
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 class CvImportItemOut(BaseModel):
     id: UUID
     candidate_id: UUID | None = None
+    candidate_full_name: str | None = None
     application_id: UUID | None = None
     original_filename: str
     mime_type: str | None = None
