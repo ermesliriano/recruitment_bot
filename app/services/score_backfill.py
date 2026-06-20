@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.enums import AiEvalStatus, ApplicationStatus, Classification, SourceScope
@@ -23,7 +23,10 @@ from app.models import (
     Answer,
     Application,
     Candidate,
+    CvDocument,
+    Question,
     ScoringRule,
+    TenantQuestion,
     Vacancy,
     VacancyQuestion,
 )
@@ -227,4 +230,135 @@ def backfill_scores(
         "fixed": fixed,
         "skipped": skipped,
         "items": items,
+    }
+
+
+def diagnose_application(db: Session, application_id: str) -> dict:
+    """Explica por que una candidatura no se puede puntuar todavia.
+
+    Devuelve el estado del CV, de la evaluacion IA y que preguntas obligatorias
+    activas (de vacante y de tenant) siguen sin responder.
+    """
+    app = db.execute(
+        select(Application).where(Application.id == application_id)
+    ).scalar_one_or_none()
+    if app is None:
+        return {"found": False, "application_id": application_id}
+
+    svc = RecruitmentService()
+
+    # CV mas reciente.
+    cv = db.execute(
+        select(CvDocument)
+        .where(CvDocument.application_id == app.id)
+        .order_by(CvDocument.version.desc())
+    ).scalars().first()
+    cv_info = None
+    if cv is not None:
+        cv_info = {
+            "version": cv.version,
+            "original_filename": cv.original_filename,
+            "mime_type": cv.mime_type,
+            "parse_status": cv.parse_status.value if cv.parse_status else None,
+            "extracted_text_chars": len(cv.extracted_text or ""),
+        }
+
+    # Evaluaciones IA.
+    evals = db.execute(
+        select(AiEvaluation)
+        .where(AiEvaluation.application_id == app.id)
+        .order_by(AiEvaluation.created_at.desc())
+    ).scalars().all()
+    success_eval = next((e for e in evals if e.status == AiEvalStatus.SUCCESS), None)
+    latest_eval = evals[0] if evals else None
+    eval_info = {
+        "count": len(evals),
+        "latest_status": latest_eval.status.value if latest_eval else None,
+        "latest_error": latest_eval.error_message if latest_eval else None,
+        "has_success": success_eval is not None,
+        "cv_score_0_10": (
+            float(success_eval.cv_score_0_10)
+            if success_eval and success_eval.cv_score_0_10 is not None
+            else None
+        ),
+    }
+
+    # Preguntas de vacante obligatorias y activas.
+    vq_rows = db.execute(
+        select(VacancyQuestion, Question)
+        .join(Question, Question.id == VacancyQuestion.question_id)
+        .where(
+            VacancyQuestion.vacancy_id == app.vacancy_id,
+            VacancyQuestion.required.is_(True),
+            VacancyQuestion.is_active.is_(True),
+        )
+        .order_by(VacancyQuestion.question_order.asc())
+    ).all()
+    answered_vq_ids = set(
+        db.execute(
+            select(Answer.vacancy_question_id).where(Answer.application_id == app.id)
+        ).scalars().all()
+    )
+    required_vacancy_questions = [
+        {
+            "id": str(vq.id),
+            "field_key": vq.field_key,
+            "order": vq.question_order,
+            "prompt": vq.prompt_override or q.prompt_text,
+            "answered": vq.id in answered_vq_ids,
+        }
+        for vq, q in vq_rows
+    ]
+
+    # Preguntas de tenant obligatorias (ask_before_cv, activas y visibles).
+    tenant_questions = svc._get_ordered_tenant_questions(db, app.tenant_id)
+    answers_by_field = svc._tenant_answer_map(db, app.id)
+    answered_tenant_ids = set(
+        db.execute(
+            select(Answer.tenant_question_id).where(
+                Answer.application_id == app.id,
+                Answer.tenant_question_id.is_not(None),
+                Answer.is_valid.is_(True),
+            )
+        ).scalars().all()
+    )
+    required_tenant_questions = []
+    for tq, q in tenant_questions:
+        if not tq.required:
+            continue
+        condition_met = svc._matches_display_condition(tq.display_condition, answers_by_field)
+        answered = tq.id in answered_tenant_ids
+        required_tenant_questions.append(
+            {
+                "id": str(tq.id),
+                "field_key": tq.field_key,
+                "condition_met": condition_met,
+                "answered": answered,
+                "blocks": condition_met and not answered,
+            }
+        )
+
+    answers_count = db.execute(
+        select(func.count(Answer.id)).where(Answer.application_id == app.id)
+    ).scalar_one()
+
+    missing_vacancy = [v["field_key"] for v in required_vacancy_questions if not v["answered"]]
+    missing_tenant = [t["field_key"] for t in required_tenant_questions if t["blocks"]]
+
+    return {
+        "found": True,
+        "application_id": str(app.id),
+        "status": app.status.value if app.status else None,
+        "score_total": float(app.score_total) if app.score_total is not None else None,
+        "answers_count": answers_count,
+        "cv": cv_info,
+        "ai_evaluation": eval_info,
+        "required_vacancy_questions": required_vacancy_questions,
+        "required_tenant_questions": required_tenant_questions,
+        "missing_required_vacancy": missing_vacancy,
+        "missing_required_tenant": missing_tenant,
+        "is_backfill_candidate": eval_info["has_success"] and app.score_total is None,
+        "would_score": (
+            eval_info["has_success"] and not missing_vacancy and not missing_tenant
+        ),
     }

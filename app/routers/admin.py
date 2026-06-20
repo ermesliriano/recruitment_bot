@@ -17,7 +17,7 @@ from app.models.tenant import Tenant
 from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
-from app.services.score_backfill import backfill_scores
+from app.services.score_backfill import backfill_scores, diagnose_application
 
 router = APIRouter(prefix="/v1", tags=["Admin"], dependencies=[Depends(require_admin_token)])
 
@@ -43,6 +43,13 @@ def maintenance_backfill_scores(
         vacancy_id=vacancy_id,
         application_id=application_id,
     )
+
+
+@router.get("/maintenance/score-diagnosis/{application_id}")
+def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_db)):
+    """Explica por que una candidatura no se puede puntuar (CV, evaluacion IA y
+    preguntas obligatorias activas sin responder)."""
+    return diagnose_application(db, application_id)
 
 
 @router.get("/tenants/{tenant_id}/vacancies/{vacancy_id}/ranking")
