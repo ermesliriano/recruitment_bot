@@ -53,7 +53,12 @@ def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_d
 
 
 @router.get("/tenants/{tenant_id}/vacancies/{vacancy_id}/ranking")
-def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_db)):
+def vacancy_ranking(
+    tenant_id: str,
+    vacancy_id: str,
+    include_incomplete: bool = False,
+    db: Session = Depends(get_db),
+):
     latest_outbound_sq = (
         select(
             OutboundMessage.application_id.label("application_id"),
@@ -64,7 +69,7 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
     )
     last_outbound = aliased(OutboundMessage)
 
-    rows = db.execute(
+    rows_stmt = (
         select(
             Application.id.label("application_id"),
             Candidate.full_name.label("nombre"),
@@ -89,7 +94,15 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
             ),
         )
         .where(Application.tenant_id == tenant_id, Application.vacancy_id == vacancy_id)
-        .order_by(
+    )
+
+    # Por defecto, solo candidaturas ya evaluadas (con score_total). Esto oculta
+    # del ranking las que el candidato dejo incompletas y nunca se puntuaron.
+    if not include_incomplete:
+        rows_stmt = rows_stmt.where(Application.score_total.is_not(None))
+
+    rows = db.execute(
+        rows_stmt.order_by(
             case(
                 (Application.classification == Classification.SHORTLIST, 4),
                 (Application.classification == Classification.INTERVIEW, 3),
