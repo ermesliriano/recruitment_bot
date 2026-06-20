@@ -1061,6 +1061,7 @@ class RecruitmentService:
                 select(VacancyQuestion.id).where(
                     VacancyQuestion.vacancy_id == app.vacancy_id,
                     VacancyQuestion.required.is_(True),
+                    VacancyQuestion.is_active.is_(True),
                 )
             ).scalars().all()
             answered_ids = db.execute(
