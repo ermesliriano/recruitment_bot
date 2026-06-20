@@ -17,8 +17,32 @@ from app.models.tenant import Tenant
 from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
+from app.services.score_backfill import backfill_scores
 
 router = APIRouter(prefix="/v1", tags=["Admin"], dependencies=[Depends(require_admin_token)])
+
+
+@router.post("/maintenance/backfill-scores")
+def maintenance_backfill_scores(
+    dry_run: bool = True,
+    tenant_id: str | None = None,
+    vacancy_id: str | None = None,
+    application_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Recalcula score_total de candidaturas atascadas (sin volver a llamar al LLM).
+
+    Por seguridad, dry_run=true por defecto: no escribe, solo informa. Para
+    aplicar de verdad, pasar ?dry_run=false. Se puede acotar por tenant_id,
+    vacancy_id o application_id.
+    """
+    return backfill_scores(
+        db,
+        dry_run=dry_run,
+        tenant_id=tenant_id,
+        vacancy_id=vacancy_id,
+        application_id=application_id,
+    )
 
 
 @router.get("/tenants/{tenant_id}/vacancies/{vacancy_id}/ranking")
