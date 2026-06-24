@@ -53,12 +53,7 @@ def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_d
 
 
 @router.get("/tenants/{tenant_id}/vacancies/{vacancy_id}/ranking")
-def vacancy_ranking(
-    tenant_id: str,
-    vacancy_id: str,
-    include_incomplete: bool = False,
-    db: Session = Depends(get_db),
-):
+def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_db)):
     latest_outbound_sq = (
         select(
             OutboundMessage.application_id.label("application_id"),
@@ -69,7 +64,7 @@ def vacancy_ranking(
     )
     last_outbound = aliased(OutboundMessage)
 
-    rows_stmt = (
+    base_stmt = (
         select(
             Application.id.label("application_id"),
             Candidate.full_name.label("nombre"),
@@ -96,13 +91,24 @@ def vacancy_ranking(
         .where(Application.tenant_id == tenant_id, Application.vacancy_id == vacancy_id)
     )
 
-    # Por defecto, solo candidaturas ya evaluadas (con score_total). Esto oculta
-    # del ranking las que el candidato dejo incompletas y nunca se puntuaron.
-    if not include_incomplete:
-        rows_stmt = rows_stmt.where(Application.score_total.is_not(None))
+    def _to_row(r) -> dict:
+        return RankingRow(
+            application_id=str(r.application_id),
+            nombre=r.nombre,
+            telefono=r.telefono,
+            vacante=r.vacante,
+            origin=r.origin.value if r.origin else None,
+            channel=r.channel.value if r.channel else None,
+            outbound_status=r.outbound_status,
+            score_rules=float(r.score_rules or 0),
+            score_cv=float(r.score_cv) if r.score_cv is not None else None,
+            score_total=float(r.score_total) if r.score_total is not None else None,
+            estado=r.estado.value if r.estado else None,
+        ).model_dump()
 
-    rows = db.execute(
-        rows_stmt.order_by(
+    # Candidaturas completadas (ya evaluadas, con score_total): el ranking real.
+    completed = db.execute(
+        base_stmt.where(Application.score_total.is_not(None)).order_by(
             case(
                 (Application.classification == Classification.SHORTLIST, 4),
                 (Application.classification == Classification.INTERVIEW, 3),
@@ -114,25 +120,19 @@ def vacancy_ranking(
         )
     ).all()
 
+    # Candidaturas incompletas (sin score_total): el candidato no termino el flujo.
+    incomplete = db.execute(
+        base_stmt.where(Application.score_total.is_(None)).order_by(
+            Application.created_at.desc(),
+        )
+    ).all()
+
     return {
         "vacancy_id": vacancy_id,
-        "total": len(rows),
-        "items": [
-            RankingRow(
-                application_id=str(r.application_id),
-                nombre=r.nombre,
-                telefono=r.telefono,
-                vacante=r.vacante,
-                origin=r.origin.value if r.origin else None,
-                channel=r.channel.value if r.channel else None,
-                outbound_status=r.outbound_status,
-                score_rules=float(r.score_rules or 0),
-                score_cv=float(r.score_cv) if r.score_cv is not None else None,
-                score_total=float(r.score_total) if r.score_total is not None else None,
-                estado=r.estado.value if r.estado else None,
-            ).model_dump()
-            for r in rows
-        ],
+        "total": len(completed),
+        "items": [_to_row(r) for r in completed],
+        "incomplete_total": len(incomplete),
+        "incomplete": [_to_row(r) for r in incomplete],
     }
 
 

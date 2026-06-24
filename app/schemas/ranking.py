@@ -24,3 +24,5 @@ class RankingResponse(BaseModel):
     vacancy_id: str
     total: int
     items: list[RankingRow]
+    incomplete_total: int = 0
+    incomplete: list[RankingRow] = []
