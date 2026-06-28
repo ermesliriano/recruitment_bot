@@ -13,6 +13,7 @@ from app.models.candidate import Candidate
 from app.models.cv import CvDocument, AiEvaluation
 from app.models.outbound_message import OutboundMessage
 from app.models.question import Question, TenantQuestion, VacancyQuestion
+from app.models.session import ConversationSession
 from app.models.tenant import Tenant
 from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
@@ -52,6 +53,44 @@ def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_d
     return diagnose_application(db, application_id)
 
 
+# Etiqueta legible del punto del flujo en que se quedó una candidatura incompleta.
+_CHAT_STAGE_LABELS = {
+    "WELCOME": "Inicio de la conversación",
+    "SELECT_VACANCY": "Eligiendo vacante",
+    "CAPTURE_NAME": "Indicando su nombre",
+    "ASK_TENANT_QUESTIONS": "Preguntas de screening",
+    "VACANCY_QA_MODE": "Preguntas de la vacante",
+    "ASK_VACANCY_QUESTIONS": "Preguntas de la vacante",
+    "REQUEST_CV": "Esperando el envío del CV",
+    "WAITING_CANDIDATE_REPLY": "Esperando primer mensaje del candidato",
+    "SCORING": "Procesando / pendiente de evaluación",
+    "CONFIRM_AND_CLOSE": "Proceso completado",
+    "ESCALATE_HUMAN": "Escalado a RRHH",
+}
+
+_APP_STATUS_STAGE_LABELS = {
+    "draft": "Sin iniciar",
+    "in_progress": "En progreso",
+    "pending_ai": "Procesando CV",
+    "scoring": "Procesando / pendiente de evaluación",
+    "waiting_candidate_reply": "Esperando primer mensaje del candidato",
+    "blocked_no_opt_in": "Bloqueado (sin opt-in)",
+    "needs_human": "Escalado a RRHH",
+}
+
+
+def _incomplete_stage_label(session_state, app_status) -> str:
+    """Punto del flujo en que se quedó una candidatura, a partir del estado de la
+    conversación; si no hay sesión, cae al estado de la candidatura."""
+    state = getattr(session_state, "value", session_state)
+    if state in _CHAT_STAGE_LABELS:
+        return _CHAT_STAGE_LABELS[state]
+    status = getattr(app_status, "value", app_status)
+    if status in _APP_STATUS_STAGE_LABELS:
+        return _APP_STATUS_STAGE_LABELS[status]
+    return "Desconocido"
+
+
 @router.get("/tenants/{tenant_id}/vacancies/{vacancy_id}/ranking")
 def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_db)):
     latest_outbound_sq = (
@@ -63,6 +102,20 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
         .subquery()
     )
     last_outbound = aliased(OutboundMessage)
+
+    # Estado actual de la conversacion, para saber en que punto del flujo se
+    # quedaron las candidaturas incompletas.
+    session_state_sq = (
+        select(ConversationSession.current_state)
+        .where(
+            ConversationSession.application_id == Application.id,
+            ConversationSession.is_active.is_(True),
+        )
+        .order_by(ConversationSession.updated_at.desc())
+        .limit(1)
+        .correlate(Application)
+        .scalar_subquery()
+    )
 
     base_stmt = (
         select(
@@ -77,6 +130,8 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
             Application.score_cv,
             Application.score_total,
             Application.classification.label("estado"),
+            Application.status.label("app_status"),
+            session_state_sq.label("session_state"),
         )
         .join(Candidate, Candidate.id == Application.candidate_id)
         .join(Vacancy, Vacancy.id == Application.vacancy_id)
@@ -104,6 +159,7 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
             score_cv=float(r.score_cv) if r.score_cv is not None else None,
             score_total=float(r.score_total) if r.score_total is not None else None,
             estado=r.estado.value if r.estado else None,
+            stage=_incomplete_stage_label(r.session_state, r.app_status),
         ).model_dump()
 
     # Candidaturas completadas (ya evaluadas, con score_total): el ranking real.

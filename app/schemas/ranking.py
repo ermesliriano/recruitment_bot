@@ -16,6 +16,7 @@ class RankingRow(BaseModel):
     score_cv: float | None
     score_total: float | None
     estado: str | None
+    stage: str | None = None
 
     model_config = {"from_attributes": True}
 
