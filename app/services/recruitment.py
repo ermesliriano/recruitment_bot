@@ -390,11 +390,26 @@ class RecruitmentService:
                 if 0 <= idx < len(choices):
                     vacancy_id = str(choices[idx].id)
             else:
+                # Coincidencia por titulo SOLO a nivel de palabras completas, para
+                # que respuestas como "No" no matcheen por substring (p. ej. "no"
+                # dentro de "tecNOlogia"). Acepta igualdad exacta del titulo, o una
+                # secuencia contigua de palabras completas del titulo (min. 3 chars).
                 norm_text = norm(text)
+                text_tokens = norm_text.split()
                 for vid, title in choices:
-                    if norm_text and (norm_text == norm(title) or norm_text in norm(title)):
+                    norm_title = norm(title)
+                    if norm_text and norm_text == norm_title:
                         vacancy_id = str(vid)
                         break
+                    if len(norm_text) >= 3 and text_tokens:
+                        title_tokens = norm_title.split()
+                        n = len(text_tokens)
+                        if any(
+                            title_tokens[i : i + n] == text_tokens
+                            for i in range(len(title_tokens) - n + 1)
+                        ):
+                            vacancy_id = str(vid)
+                            break
 
         if not vacancy_id:
             return self._invalid(session, self._unrecognized_vacancy_message(session, event))
