@@ -117,6 +117,18 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
         .scalar_subquery()
     )
 
+    session_platform_sq = (
+        select(ConversationSession.platform)
+        .where(
+            ConversationSession.application_id == Application.id,
+            ConversationSession.is_active.is_(True),
+        )
+        .order_by(ConversationSession.updated_at.desc())
+        .limit(1)
+        .correlate(Application)
+        .scalar_subquery()
+    )
+
     base_stmt = (
         select(
             Application.id.label("application_id"),
@@ -132,6 +144,7 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
             Application.classification.label("estado"),
             Application.status.label("app_status"),
             session_state_sq.label("session_state"),
+            session_platform_sq.label("session_platform"),
         )
         .join(Candidate, Candidate.id == Application.candidate_id)
         .join(Vacancy, Vacancy.id == Application.vacancy_id)
@@ -153,7 +166,11 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
             telefono=r.telefono,
             vacante=r.vacante,
             origin=r.origin.value if r.origin else None,
-            channel=r.channel.value if r.channel else None,
+            channel=(
+                r.channel.value
+                if r.channel
+                else (r.session_platform.value if r.session_platform else None)
+            ),
             outbound_status=r.outbound_status,
             score_rules=float(r.score_rules or 0),
             score_cv=float(r.score_cv) if r.score_cv is not None else None,
@@ -212,6 +229,19 @@ def application_detail(tenant_id: str, application_id: str, db: Session = Depend
     candidate = db.execute(
         select(Candidate).where(Candidate.id == application.candidate_id)
     ).scalar_one_or_none()
+
+    # Canal: si una candidatura inbound no guardo preferred_platform, lo derivamos
+    # de la plataforma de la conversacion (telegram / whatsapp).
+    preferred_platform = application.preferred_platform
+    if preferred_platform is None:
+        preferred_platform = db.execute(
+            select(ConversationSession.platform)
+            .where(
+                ConversationSession.application_id == application.id,
+                ConversationSession.is_active.is_(True),
+            )
+            .order_by(ConversationSession.updated_at.desc())
+        ).scalars().first()
 
     latest_cv = db.execute(
         select(CvDocument)
@@ -360,7 +390,7 @@ def application_detail(tenant_id: str, application_id: str, db: Session = Depend
         "is_disqualified": application.is_disqualified,
         "disqualification_reason": application.disqualification_reason,
         "origin": application.origin,
-        "preferred_platform": application.preferred_platform,
+        "preferred_platform": preferred_platform,
         "last_outbound_status": latest_outbound.status if latest_outbound else None,
         "last_outbound_channel": latest_outbound.channel if latest_outbound else None,
         "recommendation": latest_eval.recommendation if latest_eval else None,

@@ -455,12 +455,17 @@ class RecruitmentService:
 
         if existing:
             application = existing
+            # Backfill del canal en candidaturas inbound antiguas creadas sin
+            # preferred_platform.
+            if application.preferred_platform is None:
+                application.preferred_platform = session.platform
         else:
             application = Application(
                 tenant_id=tenant.id,
                 candidate_id=session.candidate_id,
                 vacancy_id=vacancy.id,
                 status=ApplicationStatus.DRAFT,
+                preferred_platform=session.platform,
             )
             db.add(application)
             db.flush()
