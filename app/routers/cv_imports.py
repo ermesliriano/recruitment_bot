@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.security import require_admin_token
+from app.models.application import Application
 from app.models.candidate import Candidate
 from app.models.cv_import import CvImportJobItem
 from app.schemas.cv_import import CvImportJobOut, CvImportItemOut, ResolvePhoneIn
@@ -19,7 +20,14 @@ router = APIRouter(
 
 
 def _attach_candidate_names(db: Session, items) -> None:
-    """Resuelve candidate.full_name en bloque y lo adjunta como atributo transitorio."""
+    """Enriquece cada item (atributos transitorios) con:
+
+    - candidate_full_name: nombre del candidato.
+    - effective_status: estado a MOSTRAR, derivado del estado REAL de la
+      candidatura. item.status se congela en 'waiting_reply' cuando sale el
+      outbound y nadie lo avanza; aqui, si la candidatura ya esta evaluada
+      (score_total no nulo), mostramos 'scoring_completed'.
+    """
     candidate_ids = {item.candidate_id for item in items if item.candidate_id}
     names: dict = {}
     if candidate_ids:
@@ -29,8 +37,35 @@ def _attach_candidate_names(db: Session, items) -> None:
             )
         ).all()
         names = {cid: full_name for cid, full_name in rows}
+
+    application_ids = {item.application_id for item in items if item.application_id}
+    score_by_app: dict = {}
+    if application_ids:
+        rows = db.execute(
+            select(Application.id, Application.score_total).where(
+                Application.id.in_(application_ids)
+            )
+        ).all()
+        score_by_app = {app_id: score_total for app_id, score_total in rows}
+
+    # Estados que indican que el outbound ya salio y se espera al candidato.
+    sent_statuses = {"waiting_reply", "scoring_completed", "template_sent"}
+
     for item in items:
         item.candidate_full_name = names.get(item.candidate_id)
+
+        evaluated = (
+            item.application_id is not None
+            and score_by_app.get(item.application_id) is not None
+        )
+        if evaluated:
+            item.effective_status = "scoring_completed"
+        elif str(item.status or "") in sent_statuses:
+            # Outbound enviado pero la candidatura aun no se ha evaluado.
+            item.effective_status = "waiting_reply"
+        else:
+            # Estados de fallo/bloqueo/telefono: se respetan tal cual.
+            item.effective_status = item.status
 
 
 def _serialize_job(job) -> dict:

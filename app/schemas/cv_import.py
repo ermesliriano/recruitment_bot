@@ -11,6 +11,7 @@ class CvImportItemOut(BaseModel):
     candidate_id: UUID | None = None
     candidate_full_name: str | None = None
     application_id: UUID | None = None
+    effective_status: str | None = None
     original_filename: str
     mime_type: str | None = None
     size_bytes: int | None = None
