@@ -45,6 +45,7 @@ from app.models import (
     VacancyQuestion,
 )
 from app.services.scoring import classify_candidate, compare_rule, norm, score_answers_from_vacancy_questions, validate_answer
+from app.services.llm_conversation import LlmConversationGuide, get_flow_settings, is_llm_flow_enabled
 from app.llm_client import LlmClient
 
 logger = logging.getLogger("recruitment")
@@ -250,6 +251,24 @@ class RecruitmentService:
         ):
             return self._handle_proactive_cv(db, tenant, session, event)
 
+        # Flujo guiado por LLM (modo alternativo por tenant): el LLM interpreta
+        # el mensaje y lo normaliza para la maquina de estados, o responde con
+        # naturalidad si el candidato se desvia. Errores degradan al flujo clasico.
+        llm_guided = is_llm_flow_enabled(tenant)
+        if llm_guided and event.text and not event.attachments:
+            guided = self._llm_guide_interpret(db, tenant, session, event)
+            if guided:
+                if guided["intent"] == "clarify":
+                    return [{"text": guided["reply"]}]
+                if guided["intent"] == "restart":
+                    try:
+                        self._transition(session, ChatState.SELECT_VACANCY)
+                        return self._show_vacancies(db, tenant, session)
+                    except Exception:
+                        pass
+                if guided["intent"] == "provide_input":
+                    event.text = guided["normalized_input"]
+
         handlers = {
             ChatState.WELCOME: self._handle_welcome,
             ChatState.SELECT_VACANCY: self._handle_select_vacancy,
@@ -264,11 +283,108 @@ class RecruitmentService:
 
         handler = handlers.get(session.current_state)
         if handler:
-            return handler(db, tenant, session, event, background_tasks) \
+            messages = handler(db, tenant, session, event, background_tasks) \
                 if session.current_state in {ChatState.REQUEST_CV} \
                 else handler(db, tenant, session, event)
+            if llm_guided:
+                messages = self._llm_guide_rewrite(db, tenant, session, messages)
+            return messages
 
         return [{"text": "No te he entendido. Escribe /start para empezar de nuevo."}]
+
+    # Guia conversacional LLM (lazy, una instancia por servicio).
+    _llm_guide: LlmConversationGuide | None = None
+
+    def _get_llm_guide(self) -> LlmConversationGuide:
+        if self._llm_guide is None:
+            self._llm_guide = LlmConversationGuide()
+        return self._llm_guide
+
+    def _llm_conversation_context(self, db, tenant, session) -> dict[str, Any]:
+        """Describe que espera el flujo del candidato en el estado actual, para
+        que el LLM pueda interpretar su mensaje y re-preguntar con contexto."""
+        state = session.current_state.value if session.current_state else None
+        ctx: dict[str, Any] = {"paso_actual": state, "empresa": tenant.name}
+
+        if session.current_state == ChatState.SELECT_VACANCY:
+            vacancies = db.execute(
+                select(Vacancy.id, Vacancy.title)
+                .where(Vacancy.tenant_id == tenant.id, Vacancy.status == VacancyStatus.ACTIVE)
+                .order_by(Vacancy.created_at.desc())
+            ).all()
+            ctx["se_espera"] = "que elija una vacante de la lista numerada"
+            ctx["opciones"] = [
+                {"numero": i + 1, "titulo": v.title} for i, v in enumerate(vacancies)
+            ]
+        elif session.current_state == ChatState.CAPTURE_NAME:
+            pending = session.state_payload.get("pending_name_confirm")
+            if pending:
+                ctx["se_espera"] = (
+                    f"confirmacion si/no de que su nombre es '{pending}'"
+                )
+                ctx["tipo_respuesta"] = "boolean"
+            else:
+                ctx["se_espera"] = "su nombre completo"
+                ctx["tipo_respuesta"] = "text"
+        elif session.current_state == ChatState.ASK_TENANT_QUESTIONS:
+            questions = self._get_ordered_tenant_questions(db, tenant.id)
+            idx = int(session.state_payload.get("tenant_question_index", 0))
+            if 0 <= idx < len(questions):
+                tq, q = questions[idx]
+                ctx["se_espera"] = "respuesta a la pregunta pendiente"
+                ctx["pregunta_pendiente"] = tq.prompt_override or q.prompt_text
+                ctx["tipo_respuesta"] = getattr(q.answer_type, "value", str(q.answer_type))
+        elif session.current_state == ChatState.ASK_VACANCY_QUESTIONS:
+            app = None
+            if session.application_id:
+                app = db.execute(
+                    select(Application).where(Application.id == session.application_id)
+                ).scalar_one_or_none()
+            if app:
+                questions = self._get_ordered_questions(db, app.vacancy_id)
+                idx = int(session.state_payload.get("question_index", 0))
+                if 0 <= idx < len(questions):
+                    vq, q = questions[idx]
+                    ctx["se_espera"] = "respuesta a la pregunta pendiente"
+                    ctx["pregunta_pendiente"] = vq.prompt_override or q.prompt_text
+                    ctx["tipo_respuesta"] = getattr(q.answer_type, "value", str(q.answer_type))
+        elif session.current_state == ChatState.REQUEST_CV:
+            ctx["se_espera"] = "que adjunte su CV como documento (PDF o Word)"
+        elif session.current_state == ChatState.SCORING:
+            ctx["se_espera"] = "nada; su candidatura esta siendo evaluada"
+        elif session.current_state == ChatState.CONFIRM_AND_CLOSE:
+            ctx["se_espera"] = "nada; puede escribir /start para postular a otra vacante"
+
+        return ctx
+
+    def _llm_guide_interpret(self, db, tenant, session, event) -> dict[str, Any] | None:
+        try:
+            flow = get_flow_settings(tenant)
+            context = self._llm_conversation_context(db, tenant, session)
+            return self._get_llm_guide().interpret(
+                context=context,
+                user_text=event.text or "",
+                custom_prompt=flow["llm_flow_prompt"],
+                custom_contract=flow["llm_flow_contract"],
+            )
+        except Exception:
+            logger.exception("Fallo interpretando mensaje con LLM; se usa flujo clasico")
+            return None
+
+    def _llm_guide_rewrite(self, db, tenant, session, messages):
+        try:
+            flow = get_flow_settings(tenant)
+            if not flow["llm_rewrite_messages"] or not messages:
+                return messages
+            context = self._llm_conversation_context(db, tenant, session)
+            return self._get_llm_guide().rewrite(
+                messages=messages,
+                context=context,
+                custom_prompt=None,
+            )
+        except Exception:
+            logger.exception("Fallo reescribiendo mensajes con LLM; se envian originales")
+            return messages
 
     # ── Handlers de estado ───────────────────────────────────────────────────
 

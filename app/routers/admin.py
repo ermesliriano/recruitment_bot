@@ -1,9 +1,12 @@
 # app/routers/admin.py
 from __future__ import annotations
 
+from typing import Any, Literal
+
+from pydantic import BaseModel
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session, aliased
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.db import get_db
 from app.core.security import require_admin_token
@@ -19,8 +22,57 @@ from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
 from app.services.score_backfill import backfill_scores, diagnose_application
+from app.services.llm_conversation import get_flow_settings
 
 router = APIRouter(prefix="/v1", tags=["Admin"], dependencies=[Depends(require_admin_token)])
+
+
+# ── Flujo de conversacion por tenant (bot clasico vs flujo LLM) ───────────
+# Reservado a los maximos administradores (portadores del ADMIN_TOKEN).
+
+class ConversationFlowIn(BaseModel):
+    conversation_mode: Literal["classic", "llm"]
+    llm_flow_prompt: str | None = None
+    llm_flow_contract: dict[str, Any] | None = None
+    llm_rewrite_messages: bool = True
+
+
+@router.get("/tenants/{tenant_id}/conversation-flow")
+def get_conversation_flow(tenant_id: str, db: Session = Depends(get_db)):
+    tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant no encontrado")
+    return get_flow_settings(tenant)
+
+
+@router.put("/tenants/{tenant_id}/conversation-flow")
+def update_conversation_flow(
+    tenant_id: str,
+    payload: ConversationFlowIn,
+    db: Session = Depends(get_db),
+):
+    tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant no encontrado")
+
+    prompt = (payload.llm_flow_prompt or "").strip() or None
+    if prompt and "{contract}" not in prompt:
+        raise HTTPException(
+            status_code=422,
+            detail="El prompt personalizado debe incluir el marcador {contract} "
+            "donde se insertara el contrato JSON de salida.",
+        )
+
+    # Reasignar el dict completo para que SQLAlchemy detecte el cambio en JSONB.
+    tenant.settings_json = {
+        **(tenant.settings_json or {}),
+        "conversation_mode": payload.conversation_mode,
+        "llm_flow_prompt": prompt,
+        "llm_flow_contract": payload.llm_flow_contract,
+        "llm_rewrite_messages": payload.llm_rewrite_messages,
+    }
+    db.commit()
+    return get_flow_settings(tenant)
 
 
 @router.post("/maintenance/backfill-scores")
