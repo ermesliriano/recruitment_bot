@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -87,9 +89,21 @@ async def create_cv_import_job(
     tenant_id: str,
     vacancy_id: str = Form(...),
     requested_by: str | None = Form(default=None),
+    scheduled_at: str | None = Form(default=None),
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    scheduled_dt: datetime | None = None
+    if scheduled_at:
+        try:
+            scheduled_dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="scheduled_at no es una fecha ISO valida.")
+        if scheduled_dt.tzinfo is None:
+            scheduled_dt = scheduled_dt.replace(tzinfo=timezone.utc)
+        if scheduled_dt <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=422, detail="La fecha programada debe ser futura.")
+
     imported_files: list[ImportedCvFile] = []
     for file in files:
         imported_files.append(
@@ -106,6 +120,7 @@ async def create_cv_import_job(
         vacancy_id=vacancy_id,
         files=imported_files,
         requested_by=requested_by,
+        scheduled_at=scheduled_dt,
     )
     db.refresh(job)
     job.items = db.execute(
@@ -122,6 +137,14 @@ def list_cv_import_jobs(
     db: Session = Depends(get_db),
 ):
     service = RecruiterCvIntakeService(db)
+
+    # Barrido perezoso: al consultar el dashboard se despachan los jobs
+    # programados ya vencidos (util en Render free tier, sin cron nativo).
+    try:
+        service.run_due_scheduled_jobs()
+    except Exception:
+        db.rollback()
+
     jobs = service.list_jobs(tenant_id=tenant_id, vacancy_id=vacancy_id)
     for job in jobs:
         job.items = db.execute(
@@ -129,6 +152,25 @@ def list_cv_import_jobs(
         ).scalars().all()
         _attach_candidate_names(db, job.items)
     return [_serialize_job(job) for job in jobs]
+
+
+@router.post("/run-scheduled")
+def run_scheduled_imports(
+    tenant_id: str,
+    job_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Ejecuta los jobs programados vencidos. Con job_id fuerza el envio
+    inmediato de ese job aunque su hora no haya llegado ("Enviar ahora").
+    Tambien puede invocarse desde un cron externo para no depender de que
+    alguien abra el dashboard."""
+    service = RecruiterCvIntakeService(db)
+    if job_id:
+        job = service.get_job(tenant_id=tenant_id, job_id=job_id)
+        if job.status != "scheduled":
+            raise HTTPException(status_code=422, detail="El job no esta programado.")
+        return service.run_due_scheduled_jobs(force_job_id=job_id)
+    return service.run_due_scheduled_jobs()
 
 
 @router.get("/{job_id}", response_model=CvImportJobOut)

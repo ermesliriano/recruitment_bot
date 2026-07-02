@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -51,6 +52,7 @@ class RecruiterCvIntakeService:
         vacancy_id: str,
         files: list[ImportedCvFile],
         requested_by: str | None = None,
+        scheduled_at: datetime | None = None,
     ) -> CvImportJob:
         tenant = self.db.execute(
             select(Tenant).where(Tenant.id == tenant_id, Tenant.is_active.is_(True))
@@ -60,14 +62,16 @@ class RecruiterCvIntakeService:
             select(Vacancy).where(Vacancy.id == vacancy_id, Vacancy.tenant_id == tenant_id)
         ).scalar_one()
 
+        deferred = scheduled_at is not None
+
         job = CvImportJob(
             tenant_id=tenant.id,
             vacancy_id=vacancy.id,
             requested_by=requested_by,
             total_files=len(files),
             processed_files=0,
-            status="processing",
-            summary_json={},
+            status="scheduled" if deferred else "processing",
+            summary_json={"scheduled_at": scheduled_at.isoformat()} if deferred else {},
         )
         self.db.add(job)
         self.db.flush()
@@ -88,7 +92,13 @@ class RecruiterCvIntakeService:
             self.db.flush()
 
             try:
-                self._process_one_file(job=job, item=item, tenant=tenant, vacancy=vacancy, imported_file=imported_file)
+                if deferred:
+                    # Modo programado: solo validacion + extraccion de texto +
+                    # deteccion de telefono. El resto (candidato, candidatura,
+                    # CV, evaluacion y outbound) se ejecuta a la hora programada.
+                    self._process_one_file_deferred(item=item, imported_file=imported_file)
+                else:
+                    self._process_one_file(job=job, item=item, tenant=tenant, vacancy=vacancy, imported_file=imported_file)
             except Exception as exc:
                 item.status = "failed"
                 item.error_message = str(exc)
@@ -97,11 +107,136 @@ class RecruiterCvIntakeService:
             items.append(item)
             self.db.flush()
 
-        job.status = "completed"
-        job.summary_json = self._build_summary(items)
+        if not deferred:
+            job.status = "completed"
+        job.summary_json = self._merge_summary(job, items)
         self.db.commit()
         self.db.refresh(job)
         return job
+
+    def _process_one_file_deferred(self, *, item: CvImportJobItem, imported_file: ImportedCvFile) -> None:
+        """Procesado minimo para importaciones programadas: detecta el telefono y
+        conserva SIEMPRE el binario para reanudar el procesado a la hora prevista."""
+        ext = validate_cv(imported_file.filename, imported_file.mime_type, imported_file.size_bytes)
+        extracted_text, parse_status = extract_cv_text(ext, imported_file.content)
+
+        item.extraction_status = parse_status.value if hasattr(parse_status, "value") else str(parse_status)
+        item.extracted_preview = (extracted_text or "")[:2000]
+        item.raw_content = imported_file.content
+
+        phone_result = extract_phone_from_text(extracted_text)
+        item.phone_candidates_json = phone_result.as_dict()
+        item.phone_confidence = phone_result.confidence
+
+        if phone_result.status in ("phone_not_found", "ambiguous_phone"):
+            item.status = phone_result.status
+            item.error_message = phone_result.reason
+            return
+
+        item.detected_phone_e164 = phone_result.selected_phone
+        item.error_message = None
+        item.status = "scheduled"
+
+    @staticmethod
+    def _job_scheduled_at(job: CvImportJob) -> datetime | None:
+        raw = (job.summary_json or {}).get("scheduled_at")
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _merge_summary(self, job: CvImportJob, items: list[CvImportJobItem]) -> dict[str, Any]:
+        """Resumen de estados preservando metadatos del job (scheduled_at)."""
+        summary = self._build_summary(items)
+        scheduled_at = (job.summary_json or {}).get("scheduled_at")
+        if scheduled_at:
+            summary["scheduled_at"] = scheduled_at
+        return summary
+
+    def run_due_scheduled_jobs(self, *, now: datetime | None = None, force_job_id: str | None = None) -> dict[str, Any]:
+        """Ejecuta los jobs programados vencidos (o uno concreto con force_job_id,
+        sin esperar a su hora). Los items 'scheduled' con telefono pasan por el
+        procesado completo (candidato, candidatura, CV, evaluacion y outbound).
+        Los items pendientes de telefono se quedan como estan."""
+        now = now or datetime.now(timezone.utc)
+
+        stmt = select(CvImportJob).where(CvImportJob.status == "scheduled")
+        if force_job_id:
+            stmt = stmt.where(CvImportJob.id == force_job_id)
+        jobs = self.db.execute(stmt).scalars().all()
+
+        ran: list[dict[str, Any]] = []
+        for job in jobs:
+            due_at = self._job_scheduled_at(job)
+            if not force_job_id and (due_at is None or due_at > now):
+                continue
+
+            tenant = self.db.execute(
+                select(Tenant).where(Tenant.id == job.tenant_id, Tenant.is_active.is_(True))
+            ).scalar_one_or_none()
+            vacancy = self.db.execute(
+                select(Vacancy).where(Vacancy.id == job.vacancy_id)
+            ).scalar_one_or_none()
+            if tenant is None or vacancy is None:
+                continue
+
+            items = self.db.execute(
+                select(CvImportJobItem).where(
+                    CvImportJobItem.job_id == job.id,
+                    CvImportJobItem.status == "scheduled",
+                )
+            ).scalars().all()
+
+            sent = 0
+            failed = 0
+            for item in items:
+                if not item.raw_content or not item.detected_phone_e164:
+                    item.status = "failed"
+                    item.error_message = "El item programado no conserva CV o telefono para procesarse."
+                    failed += 1
+                    continue
+                try:
+                    imported_file = ImportedCvFile(
+                        filename=item.original_filename,
+                        mime_type=item.mime_type or "application/octet-stream",
+                        content=bytes(item.raw_content),
+                    )
+                    ext = validate_cv(imported_file.filename, imported_file.mime_type, imported_file.size_bytes)
+                    extracted_text, parse_status = extract_cv_text(ext, imported_file.content)
+                    self._continue_processing(
+                        job=job,
+                        item=item,
+                        tenant=tenant,
+                        vacancy=vacancy,
+                        imported_file=imported_file,
+                        ext=ext,
+                        extracted_text=extracted_text,
+                        parse_status=parse_status,
+                        phone_e164=item.detected_phone_e164,
+                    )
+                    sent += 1
+                except Exception as exc:
+                    self.db.rollback()
+                    item.status = "failed"
+                    item.error_message = str(exc)
+                    failed += 1
+                    self.db.commit()
+
+            # El job termina: los items pendientes de telefono siguen visibles
+            # para corregirse; al resolverse (job ya no 'scheduled'), se envian
+            # inmediatamente por el flujo habitual.
+            job.status = "completed"
+            job.completed_at = now
+            job.summary_json = self._refresh_job_summary(str(job.id), job=job)
+            self.db.commit()
+            ran.append({"job_id": str(job.id), "sent": sent, "failed": failed})
+
+        return {"executed_jobs": ran, "count": len(ran)}
 
     def get_job(self, tenant_id: str, job_id: str) -> CvImportJob:
         return self.db.execute(
@@ -185,6 +320,27 @@ class RecruiterCvIntakeService:
         job = self.db.execute(
             select(CvImportJob).where(CvImportJob.id == job_id, CvImportJob.tenant_id == tenant_id)
         ).scalar_one()
+
+        # Job programado y aun no vencido: el telefono queda registrado y el CV
+        # vuelve a la cola programada (se procesara con el resto a la hora prevista),
+        # sin enviar ningun mensaje ahora.
+        if job.status == "scheduled":
+            item.detected_phone_e164 = phone_e164
+            item.error_message = None
+            item.status = "scheduled"
+            item.phone_confidence = Decimal("1.00")
+            item.phone_candidates_json = {
+                "selected_phone": phone_e164,
+                "confidence": 1.0,
+                "status": "manual",
+                "reason": "Teléfono introducido manualmente por el reclutador.",
+                "candidates": [],
+            }
+            job.summary_json = self._refresh_job_summary(job_id, job=job)
+            self.db.commit()
+            self.db.refresh(item)
+            return item
+
         vacancy = self.db.execute(
             select(Vacancy).where(Vacancy.id == job.vacancy_id, Vacancy.tenant_id == tenant_id)
         ).scalar_one()
@@ -221,16 +377,20 @@ class RecruiterCvIntakeService:
             phone_e164=phone_e164,
         )
 
-        job.summary_json = self._refresh_job_summary(job_id)
+        job.summary_json = self._refresh_job_summary(job_id, job=job)
         self.db.commit()
         self.db.refresh(item)
         return item
 
-    def _refresh_job_summary(self, job_id: str) -> dict[str, Any]:
+    def _refresh_job_summary(self, job_id: str, job: CvImportJob | None = None) -> dict[str, Any]:
         items = self.db.execute(
             select(CvImportJobItem).where(CvImportJobItem.job_id == job_id)
         ).scalars().all()
-        return self._build_summary(items)
+        if job is None:
+            job = self.db.execute(
+                select(CvImportJob).where(CvImportJob.id == job_id)
+            ).scalar_one()
+        return self._merge_summary(job, items)
 
     @staticmethod
     def _normalize_manual_phone(raw: str) -> str:
