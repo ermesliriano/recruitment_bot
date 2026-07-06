@@ -41,9 +41,12 @@ class ConversationFlowIn(BaseModel):
     conversation_mode: Literal["classic", "llm"]
     llm_flow_prompt: str | None = None
     llm_personality_prompt: str | None = None
-    institutional_info: dict[str, Any] | None = None
     llm_flow_contract: dict[str, Any] | None = None
     llm_rewrite_messages: bool = True
+
+
+class CompanyInfoIn(BaseModel):
+    institutional_info: dict[str, Any] | None = None
 
 
 def _flow_response(tenant) -> dict[str, Any]:
@@ -94,6 +97,42 @@ def update_conversation_flow(
     if personality == DEFAULT_PERSONALITY_PROMPT.strip():
         personality = None
 
+    # Nota: institutional_info NO se toca desde aqui; se gestiona en su propio
+    # endpoint (company-info) para que guardar prompts no pise los datos de la
+    # empresa introducidos por el cliente.
+    tenant.settings_json = {
+        **(tenant.settings_json or {}),
+        "conversation_mode": payload.conversation_mode,
+        "llm_flow_prompt": prompt,
+        "llm_personality_prompt": personality,
+        "llm_flow_contract": payload.llm_flow_contract,
+        "llm_rewrite_messages": payload.llm_rewrite_messages,
+    }
+    db.commit()
+    return _flow_response(tenant)
+
+
+@router.get("/tenants/{tenant_id}/company-info")
+def get_company_info(tenant_id: str, db: Session = Depends(get_db)):
+    tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    return {
+        "institutional_info": (tenant.settings_json or {}).get("institutional_info") or {},
+        "fields": list(INSTITUTIONAL_INFO_FIELDS),
+    }
+
+
+@router.put("/tenants/{tenant_id}/company-info")
+def update_company_info(
+    tenant_id: str,
+    payload: CompanyInfoIn,
+    db: Session = Depends(get_db),
+):
+    tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+
     institutional = None
     if payload.institutional_info:
         institutional = {
@@ -103,18 +142,15 @@ def update_conversation_flow(
             and str(payload.institutional_info[key]).strip()
         } or None
 
-    # Reasignar el dict completo para que SQLAlchemy detecte el cambio en JSONB.
     tenant.settings_json = {
         **(tenant.settings_json or {}),
-        "conversation_mode": payload.conversation_mode,
-        "llm_flow_prompt": prompt,
-        "llm_personality_prompt": personality,
         "institutional_info": institutional,
-        "llm_flow_contract": payload.llm_flow_contract,
-        "llm_rewrite_messages": payload.llm_rewrite_messages,
     }
     db.commit()
-    return _flow_response(tenant)
+    return {
+        "institutional_info": institutional or {},
+        "fields": list(INSTITUTIONAL_INFO_FIELDS),
+    }
 
 
 @router.post("/maintenance/backfill-scores")
