@@ -235,9 +235,12 @@ class RecruitmentService:
         session.last_incoming_event_id = event.event_id
         session.last_user_message_at = datetime.now(timezone.utc)
 
-        if session.current_state == ChatState.CONFIRM_AND_CLOSE and norm(event.text) == "/start":
+        if session.current_state == ChatState.CONFIRM_AND_CLOSE and self._wants_restart(event.text):
             self._transition(session, ChatState.SELECT_VACANCY)
-            return self._show_vacancies(db, tenant, session)
+            messages = self._show_vacancies(db, tenant, session)
+            if is_llm_flow_enabled(tenant):
+                messages = self._llm_guide_rewrite(db, tenant, session, messages)
+            return messages
 
         # CV proactivo (inbound): confirmación pendiente, o adjunto recibido antes
         # de que se pida el CV (con application ya creada y sin CV previo).
@@ -286,7 +289,8 @@ class RecruitmentService:
                 if guided["intent"] == "restart":
                     try:
                         self._transition(session, ChatState.SELECT_VACANCY)
-                        return self._show_vacancies(db, tenant, session)
+                        messages = self._show_vacancies(db, tenant, session)
+                        return self._llm_guide_rewrite(db, tenant, session, messages)
                     except Exception:
                         pass
                 if guided["intent"] == "provide_input":
@@ -301,7 +305,7 @@ class RecruitmentService:
             ChatState.REQUEST_CV: self._handle_request_cv,
             ChatState.ASK_VACANCY_QUESTIONS: self._handle_ask_questions,
             ChatState.SCORING: lambda db, t, s, e: [{"text": "Estoy evaluando tu candidatura. Te escribiré en breve."}],
-            ChatState.CONFIRM_AND_CLOSE: lambda db, t, s, e: [{"text": "Tu postulación ya está completa. Escribe /start para postular a otra vacante activa."}],
+            ChatState.CONFIRM_AND_CLOSE: lambda db, t, s, e: [{"text": "Tu postulación ya está completa. Si deseas postular a otra vacante activa, escribe \"empezar\"."}],
         }
 
         handler = handlers.get(session.current_state)
@@ -313,7 +317,21 @@ class RecruitmentService:
                 messages = self._llm_guide_rewrite(db, tenant, session, messages)
             return messages
 
-        return [{"text": "No te he entendido. Escribe /start para empezar de nuevo."}]
+        return [{"text": "No te he entendido. Escribe \"empezar\" para comenzar de nuevo."}]
+
+    @staticmethod
+    def _wants_restart(text: str | None) -> bool:
+        """Detecta una peticion explicita de reiniciar / ver vacantes, sin depender
+        del comando /start (herencia de Telegram), que se mantiene por compatibilidad."""
+        value = norm(text)
+        if not value:
+            return False
+        if value in {"/start", "start", "empezar", "comenzar", "reiniciar", "inicio", "menu", "menú"}:
+            return True
+        return any(
+            phrase in value
+            for phrase in ("otra vacante", "ver vacantes", "ver las vacantes", "postular a otra")
+        )
 
     # Guia conversacional LLM (lazy, una instancia por servicio).
     _llm_guide: LlmConversationGuide | None = None
@@ -382,7 +400,13 @@ class RecruitmentService:
         elif session.current_state == ChatState.SCORING:
             ctx["se_espera"] = "nada; su candidatura esta siendo evaluada"
         elif session.current_state == ChatState.CONFIRM_AND_CLOSE:
-            ctx["se_espera"] = "nada; puede escribir /start para postular a otra vacante"
+            ctx["se_espera"] = (
+                "nada; el proceso ya ha finalizado correctamente. Solo debe reiniciarse "
+                "(intent restart) si el candidato pide EXPLICITAMENTE postular a otra "
+                "vacante o ver las vacantes. Mensajes de cortesia o despedida (gracias, "
+                "ok, perfecto, listo) deben responderse con una despedida breve y amable "
+                "(intent clarify), sin reiniciar nada."
+            )
 
         return ctx
 
@@ -596,7 +620,7 @@ class RecruitmentService:
             return [{"text": (
                 f"Ya tienes una candidatura registrada para *{vacancy.title}*, así que no la dupliquemos. "
                 "Nuestro equipo de RRHH la revisará y te contactará. "
-                "Si quieres postular a otra vacante, escribe /start."
+                "Si quieres postular a otra vacante, escribe \"empezar\"."
             )}]
 
         if existing:
@@ -1364,7 +1388,7 @@ class RecruitmentService:
                 "Hemos recibido correctamente tu información y tu CV.\n\n"
                 "El equipo de RRHH revisará tu candidatura y te contactará próximamente "
                 "para darte feedback sobre los siguientes pasos.\n\n"
-                "Si quieres postular a otra vacante activa, escribe /start cuando quieras."
+                "Si quieres postular a otra vacante activa, escribe \"empezar\" cuando quieras."
             )}]
         except Exception as e:
             log_event(db=db, level="ERROR", source="scoring", event="SCORING_EXCEPTION",

@@ -189,11 +189,13 @@ En reply:
 4 Invita a continuar.
 ==============================
 restart
-Cuando solicite:
+Cuando solicite EXPLÍCITAMENTE:
 • reiniciar
 • cambiar vacante
 • volver al inicio
 • ver vacantes nuevamente
+Los mensajes de cortesía o despedida (gracias, ok, listo, perfecto, buen día) NUNCA son restart:
+respóndelos con clarify mediante una despedida breve y amable, sin reiniciar nada.
 ==============================
 passthrough
 Cuando no exista suficiente información para interpretar correctamente el mensaje.
@@ -255,7 +257,7 @@ Reescribe los mensajes del bot para que suenen naturales, calidos y profesionale
 - Conserva EXACTAMENTE los datos: listas numeradas de vacantes (mismos numeros y titulos),
   nombres, preguntas y su significado. No agregues ni quites opciones ni preguntas.
 - PROHIBIDO inventar vacantes, opciones o placeholders (nunca "Opcion A", "Vacante 1", etc.).
-- No inventes informacion. No cambies instrucciones (ej. "escribe /start").
+- No inventes informacion. No cambies instrucciones (ej. "escribe empezar").
 - Un mensaje reescrito por cada mensaje original, mismo orden.
 - Manten cada mensaje razonablemente corto (chat movil).
 
