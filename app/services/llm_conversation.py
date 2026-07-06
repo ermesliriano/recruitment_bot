@@ -3,31 +3,24 @@
 Flujo de conversacion guiado por LLM (modo alternativo al bot clasico).
 
 Arquitectura: el LLM actua como capa de INTERPRETACION y REDACCION sobre la
-maquina de estados existente, que sigue siendo la fuente de verdad:
+maquina de estados existente, que sigue siendo la fuente de verdad. La
+validacion, la persistencia de Answer y el scoring NO cambian.
 
-  1. interpret(): recibe el mensaje del candidato + el contexto de lo que el
-     flujo espera en el estado actual (vacantes disponibles, pregunta pendiente
-     con su tipo, CV esperado...) y devuelve un JSON con:
-       - intent = "provide_input": el candidato respondio; normalized_input es
-         el valor ya normalizado que los handlers clasicos pueden consumir
-         (numero de vacante, "si"/"no", numero, texto).
-       - intent = "clarify": la respuesta fue invalida/ambigua o el candidato
-         hizo una pregunta; reply es la re-pregunta natural que se le envia,
-         sin avanzar de estado.
-       - intent = "restart": el candidato quiere empezar de nuevo / ver vacantes.
-       - intent = "passthrough": el LLM no esta seguro; se delega al flujo clasico.
-  2. rewrite(): reescribe los mensajes salientes del bot clasico con un tono
-     natural y cercano, preservando datos (listas numeradas, nombres, formatos).
-
-La validacion, la persistencia de Answer y el scoring NO cambian: si el LLM
-extrae un valor, este pasa por los mismos validadores del flujo clasico.
+El system prompt se compone de TRES bloques configurables por tenant:
+  1. Prompt de la personalidad (quien es la asistente y como se comporta)
+  2. Prompt del guia conversacional (como interpretar y el contrato JSON)
+  3. Informacion institucional (datos de la empresa, inyectados en el CONTEXTO)
 
 Configuracion por tenant (en tenants.settings_json, sin migracion):
   - conversation_mode: "classic" (default) | "llm"
-  - llm_flow_prompt: system prompt personalizado (opcional; sustituye al default)
-  - llm_flow_contract: contrato JSON personalizado (opcional, dict; se muestra
-    al LLM como estructura de salida obligatoria)
+  - llm_flow_prompt: prompt del guia personalizado (None = default)
+  - llm_personality_prompt: prompt de personalidad personalizado (None = default)
+  - institutional_info: dict con los datos de la empresa (None = sin datos)
+  - llm_flow_contract: contrato JSON personalizado (None = default)
   - llm_rewrite_messages: bool (default true) reescritura de mensajes salientes
+
+Los defaults viven aqui y se exponen por API para que el frontend los muestre
+y los administradores puedan editarlos, ampliarlos o recortarlos.
 
 Cualquier error del LLM degrada silenciosamente al flujo clasico.
 """
@@ -46,12 +39,28 @@ from app.core.config import settings
 CONVERSATION_MODE_CLASSIC = "classic"
 CONVERSATION_MODE_LLM = "llm"
 
+# Campos admitidos en la informacion institucional del tenant.
+INSTITUTIONAL_INFO_FIELDS = (
+    "name",
+    "description",
+    "industry",
+    "location",
+    "website",
+    "instagram",
+    "facebook",
+    "linkedin",
+    "email",
+    "phone",
+)
+
 
 def get_flow_settings(tenant) -> dict[str, Any]:
     raw = tenant.settings_json or {}
     return {
         "conversation_mode": raw.get("conversation_mode") or CONVERSATION_MODE_CLASSIC,
         "llm_flow_prompt": raw.get("llm_flow_prompt") or None,
+        "llm_personality_prompt": raw.get("llm_personality_prompt") or None,
+        "institutional_info": raw.get("institutional_info") or None,
         "llm_flow_contract": raw.get("llm_flow_contract") or None,
         "llm_rewrite_messages": bool(raw.get("llm_rewrite_messages", True)),
     }
@@ -61,7 +70,18 @@ def is_llm_flow_enabled(tenant) -> bool:
     return get_flow_settings(tenant)["conversation_mode"] == CONVERSATION_MODE_LLM
 
 
-# ── Contrato y prompt por defecto (personalizables por tenant) ────────────────
+def institutional_company_context(tenant) -> dict[str, Any] | None:
+    """Datos institucionales no vacios del tenant, para inyectar en el CONTEXTO."""
+    info = get_flow_settings(tenant)["institutional_info"] or {}
+    company = {
+        key: str(info[key]).strip()
+        for key in INSTITUTIONAL_INFO_FIELDS
+        if info.get(key) and str(info[key]).strip()
+    }
+    return company or None
+
+
+# ── Bloques por defecto (personalizables por tenant) ───────────────────────────
 
 DEFAULT_CONTRACT: dict[str, Any] = {
     "intent": "provide_input | clarify | restart | passthrough",
@@ -69,56 +89,169 @@ DEFAULT_CONTRACT: dict[str, Any] = {
     "reply": "string o null",
 }
 
-DEFAULT_GUIDE_PROMPT = """
-Eres el asistente conversacional de un proceso de seleccion por chat (WhatsApp/Telegram).
-Tu funcion es interpretar el mensaje del candidato dentro del paso actual del proceso y
-ayudarle con calidez cuando se equivoca, duda o pregunta algo.
-
-Recibiras un CONTEXTO con: el paso actual, que se espera del candidato en este paso
-(opciones de vacante numeradas, una pregunta con su tipo de respuesta, el envio de un CV...),
-y el MENSAJE del candidato.
-
-Devuelve EXCLUSIVAMENTE un JSON valido con esta estructura exacta:
-{contract}
-
-Reglas para decidir intent:
-- "provide_input": el mensaje del candidato responde a lo que se espera. En normalized_input
-  devuelve el valor normalizado:
-  * Si se esperan opciones numeradas de vacante: devuelve SOLO el numero de la opcion elegida
-    (ej. "1"). Solo si la eleccion es inequivoca.
-  * Si la pregunta es de tipo boolean: devuelve exactamente "si" o "no".
-  * Si la pregunta es de tipo number: devuelve solo el numero (ej. "3").
-  * Si la pregunta es de tipo text o se espera el nombre: devuelve el texto relevante limpio
-    (sin muletillas como "mi nombre es").
-- "clarify": el mensaje NO responde a lo esperado (respuesta ambigua, invalida, una pregunta
-  del candidato, un saludo, una queja...). En reply redacta una respuesta natural, breve y
-  amable EN ESPANOL que: (1) atienda lo que dijo o pregunto el candidato si procede, y
-  (2) le recuerde con claridad que se espera de el en este paso (repite las opciones o la
-  pregunta pendiente). No inventes informacion sobre la empresa ni la vacante que no este
-  en el contexto.
-- "restart": el candidato pide explicitamente empezar de nuevo, cambiar de vacante o ver
-  las vacantes otra vez.
-- "passthrough": no estas seguro de como interpretar el mensaje. No fuerces una respuesta.
-
-Reglas CRITICAS contra contenido inventado:
-- PROHIBIDO inventar vacantes, opciones, listas o placeholders (nunca escribas cosas como
-  "Opcion A", "Opcion B", "Vacante 1", etc.).
-- Si el CONTEXTO incluye el campo "opciones", al re-preguntar en reply DEBES repetir esas
-  opciones LITERALMENTE, con su numero y titulo exactos, sin anadir ni quitar ninguna.
-- Si el CONTEXTO NO incluye "opciones" ni "pregunta_pendiente" y necesitarias mencionarlas
-  para responder, usa intent "passthrough" en lugar de "clarify".
-- reply solo puede contener informacion presente en el CONTEXTO o en el mensaje del candidato.
-
-Reglas adicionales:
-- NUNCA marques "provide_input" con una eleccion de vacante si el candidato dijo "no",
-  rechazo las opciones o no eligio claramente una.
-- reply siempre en espanol, maximo 500 caracteres, sin markdown.
-- No añadas texto fuera del JSON.
+DEFAULT_PERSONALITY_PROMPT = """
+Eres María, la Asistente Virtual de Reclutamiento.
+Representas al departamento de Recursos Humanos de la empresa que está realizando el proceso de selección.
+Tu función es acompañar a cada candidato durante su postulación, brindando una experiencia clara, profesional y cercana.
+Tu personalidad debe transmitir:
+• Profesionalismo.
+• Empatía.
+• Objetividad.
+• Organización.
+• Respeto.
+• Agilidad.
+Nunca debes sonar como un formulario automático.
+Habla de forma natural, breve y cordial.
+Siempre procura que el candidato complete exitosamente el proceso.
+No debates.
+No juzgas respuestas.
+No haces bromas.
+No utilizas sarcasmo.
+No prometes contrataciones.
+No prometes entrevistas.
+No prometes salarios.
+No haces evaluaciones del candidato.
+No inventas información.
+Cuando el candidato haga preguntas sobre la empresa o la vacante, responde únicamente utilizando la información recibida en el CONTEXTO.
+Si la información no existe en el contexto, indica amablemente que el equipo de Recursos Humanos podrá ampliarla durante el proceso.
+Cada respuesta debe ayudar al candidato a avanzar hacia el siguiente paso.
+Nunca pierdas de vista que tu objetivo principal es completar correctamente la postulación.
 """.strip()
 
+DEFAULT_GUIDE_PROMPT = """
+Eres el motor de interpretación conversacional de María, la Asistente Virtual de Reclutamiento.
+Recibirás:
+1. CONTEXTO
+2. MENSAJE DEL CANDIDATO
+El CONTEXTO contiene toda la información necesaria para interpretar el mensaje, incluyendo:
+• Empresa
+• Vacante
+• Paso actual
+• Tipo de respuesta esperada
+• Pregunta pendiente
+• Variables dinámicas
+• Historial necesario
+Devuelve EXCLUSIVAMENTE un JSON válido con esta estructura:
+{contract}
+==============================
+FILOSOFÍA
+==============================
+Tu prioridad es mantener el flujo del proceso.
+Antes de solicitar aclaraciones intenta interpretar correctamente la intención del candidato.
+Si la respuesta puede normalizarse de forma segura, continúa.
+Solicita aclaraciones únicamente cuando exista una ambigüedad real.
+No hagas repetir información que ya pueda extraerse del mensaje.
+==============================
+INTENT
+==============================
+provide_input
+Cuando el candidato respondió correctamente.
+Normaliza:
+Vacantes
+Devuelve únicamente el número.
+Boolean
+Devuelve exactamente:
+"si"
+o
+"no"
+Acepta expresiones equivalentes.
+Number
+Extrae únicamente el número.
+Ejemplos:
+"unos cinco"
+↓
+5
+"aproximadamente 4"
+↓
+4
+"ganaba RD$35,000"
+↓
+35000
+Text
+Elimina frases como:
+Mi nombre es
+Soy
+Me llamo
+Quisiera indicar
+y devuelve únicamente el dato.
+==============================
+clarify
+Utilízalo cuando:
+• exista ambigüedad
+• el candidato haga una pregunta
+• exista un saludo
+• falte información
+• el formato sea incompatible
+En reply:
+1 Responde la duda si el contexto contiene la respuesta.
+2 Si no existe la información, indícalo.
+3 Recuerda cuál es el paso pendiente.
+4 Invita a continuar.
+==============================
+restart
+Cuando solicite:
+• reiniciar
+• cambiar vacante
+• volver al inicio
+• ver vacantes nuevamente
+==============================
+passthrough
+Cuando no exista suficiente información para interpretar correctamente el mensaje.
+==============================
+EMPRESA Y VACANTE
+==============================
+El CONTEXTO puede contener información dinámica sobre:
+• empresa
+• vacante
+• salario
+• horario
+• modalidad
+• beneficios
+• ubicación
+• fecha de inicio
+• funciones
+• redes sociales
+• página web
+Puedes responder preguntas relacionadas únicamente utilizando dicha información.
+Nunca inventes información.
+Si el dato no existe en el CONTEXTO, responde indicando que el equipo de Recursos Humanos podrá ampliarlo durante el proceso.
+==============================
+REGLAS
+==============================
+Nunca inventes información.
+Nunca cambies datos del contexto.
+Nunca completes datos faltantes.
+Nunca inventes vacantes, opciones ni placeholders (nunca "Opción A", "Vacante 1", etc.).
+Si el CONTEXTO incluye "opciones", al re-preguntar repítelas literalmente, con su número y título exactos.
+Si el CONTEXTO no incluye "opciones" ni "pregunta_pendiente" y necesitarías mencionarlas, usa passthrough.
+No respondas fuera del JSON.
+reply:
+• español
+• máximo 500 caracteres
+• sin Markdown
+• natural
+• profesional
+""".strip()
+
+# Plantilla de referencia de la informacion institucional (se muestra en el
+# frontend como guia de los campos disponibles).
+INSTITUTIONAL_INFO_TEMPLATE: dict[str, Any] = {
+    "company": {
+        "name": "@COMPANY_NAME",
+        "description": "@COMPANY_DESCRIPTION",
+        "industry": "@COMPANY_INDUSTRY",
+        "location": "@COMPANY_LOCATION",
+        "website": "@COMPANY_WEBSITE",
+        "instagram": "@COMPANY_INSTAGRAM",
+        "facebook": "@COMPANY_FACEBOOK",
+        "linkedin": "@COMPANY_LINKEDIN",
+        "email": "@COMPANY_EMAIL",
+        "phone": "@COMPANY_PHONE",
+    }
+}
+
 DEFAULT_REWRITE_PROMPT = """
-Eres el asistente conversacional de un proceso de seleccion por chat. Reescribe los mensajes
-del bot para que suenen naturales, calidos y profesionales EN ESPANOL, con estas reglas:
+Reescribe los mensajes del bot para que suenen naturales, calidos y profesionales EN ESPANOL, con estas reglas:
 - Conserva EXACTAMENTE los datos: listas numeradas de vacantes (mismos numeros y titulos),
   nombres, preguntas y su significado. No agregues ni quites opciones ni preguntas.
 - PROHIBIDO inventar vacantes, opciones o placeholders (nunca "Opcion A", "Vacante 1", etc.).
@@ -129,6 +262,20 @@ del bot para que suenen naturales, calidos y profesionales EN ESPANOL, con estas
 Devuelve EXCLUSIVAMENTE un JSON valido: {"messages": ["...", "..."]} con tantos elementos
 como mensajes recibiste, en el mismo orden. Sin texto fuera del JSON.
 """.strip()
+
+
+def compose_system_prompt(
+    *,
+    personality: str | None,
+    guide: str | None,
+    contract: dict[str, Any] | None,
+) -> str:
+    """Compone el system prompt: personalidad + guia (con el contrato inyectado)."""
+    personality_text = (personality or DEFAULT_PERSONALITY_PROMPT).strip()
+    guide_text = (guide or DEFAULT_GUIDE_PROMPT).replace(
+        "{contract}", json.dumps(contract or DEFAULT_CONTRACT, ensure_ascii=False, indent=2)
+    )
+    return personality_text + "\n\n" + guide_text
 
 
 # ── Cliente ────────────────────────────────────────────────────────────────────
@@ -180,11 +327,13 @@ class LlmConversationGuide:
         context: dict[str, Any],
         user_text: str,
         custom_prompt: str | None = None,
+        custom_personality: str | None = None,
         custom_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        contract = custom_contract or DEFAULT_CONTRACT
-        system = (custom_prompt or DEFAULT_GUIDE_PROMPT).replace(
-            "{contract}", json.dumps(contract, ensure_ascii=False, indent=2)
+        system = compose_system_prompt(
+            personality=custom_personality,
+            guide=custom_prompt,
+            contract=custom_contract,
         )
         user = (
             "CONTEXTO:\n"
@@ -221,14 +370,18 @@ class LlmConversationGuide:
         *,
         messages: list[dict[str, Any]],
         context: dict[str, Any],
-        custom_prompt: str | None = None,
+        custom_personality: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Reescribe los textos de los mensajes salientes. Los mensajes con
-        reply_markup (botones) mantienen su markup; solo se toca el texto.
-        Ante cualquier problema, devuelve los mensajes originales."""
+        """Reescribe los textos de los mensajes salientes con la personalidad del
+        tenant. Ante cualquier problema, devuelve los mensajes originales."""
         texts = [m.get("text") or "" for m in messages]
         if not any(texts):
             return messages
+        system = (
+            (custom_personality or DEFAULT_PERSONALITY_PROMPT).strip()
+            + "\n\n"
+            + DEFAULT_REWRITE_PROMPT
+        )
         user = (
             "CONTEXTO:\n"
             + json.dumps(context, ensure_ascii=False, indent=2)
@@ -236,9 +389,7 @@ class LlmConversationGuide:
             + json.dumps(texts, ensure_ascii=False, indent=2)
         )
         try:
-            obj = _extract_json_object(
-                self._chat(custom_prompt or DEFAULT_REWRITE_PROMPT, user)
-            )
+            obj = _extract_json_object(self._chat(system, user))
             rewritten = obj.get("messages")
             if not isinstance(rewritten, list) or len(rewritten) != len(messages):
                 return messages

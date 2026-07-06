@@ -22,7 +22,14 @@ from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
 from app.services.score_backfill import backfill_scores, diagnose_application
-from app.services.llm_conversation import get_flow_settings
+from app.services.llm_conversation import (
+    DEFAULT_CONTRACT,
+    DEFAULT_GUIDE_PROMPT,
+    DEFAULT_PERSONALITY_PROMPT,
+    INSTITUTIONAL_INFO_FIELDS,
+    INSTITUTIONAL_INFO_TEMPLATE,
+    get_flow_settings,
+)
 
 router = APIRouter(prefix="/v1", tags=["Admin"], dependencies=[Depends(require_admin_token)])
 
@@ -33,8 +40,24 @@ router = APIRouter(prefix="/v1", tags=["Admin"], dependencies=[Depends(require_a
 class ConversationFlowIn(BaseModel):
     conversation_mode: Literal["classic", "llm"]
     llm_flow_prompt: str | None = None
+    llm_personality_prompt: str | None = None
+    institutional_info: dict[str, Any] | None = None
     llm_flow_contract: dict[str, Any] | None = None
     llm_rewrite_messages: bool = True
+
+
+def _flow_response(tenant) -> dict[str, Any]:
+    """Configuracion efectiva + defaults, para que el frontend pueda mostrar y
+    editar los textos por defecto aunque el tenant no los haya personalizado."""
+    flow = get_flow_settings(tenant)
+    flow["defaults"] = {
+        "llm_flow_prompt": DEFAULT_GUIDE_PROMPT,
+        "llm_personality_prompt": DEFAULT_PERSONALITY_PROMPT,
+        "llm_flow_contract": DEFAULT_CONTRACT,
+        "institutional_info_template": INSTITUTIONAL_INFO_TEMPLATE,
+        "institutional_info_fields": list(INSTITUTIONAL_INFO_FIELDS),
+    }
+    return flow
 
 
 @router.get("/tenants/{tenant_id}/conversation-flow")
@@ -42,7 +65,7 @@ def get_conversation_flow(tenant_id: str, db: Session = Depends(get_db)):
     tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant no encontrado")
-    return get_flow_settings(tenant)
+    return _flow_response(tenant)
 
 
 @router.put("/tenants/{tenant_id}/conversation-flow")
@@ -59,20 +82,39 @@ def update_conversation_flow(
     if prompt and "{contract}" not in prompt:
         raise HTTPException(
             status_code=422,
-            detail="El prompt personalizado debe incluir el marcador {contract} "
+            detail="El prompt del guía debe incluir el marcador {contract} "
             "donde se insertara el contrato JSON de salida.",
         )
+    # Si el texto coincide con el default, se guarda None: asi el tenant sigue
+    # heredando futuras mejoras del prompt por defecto.
+    if prompt == DEFAULT_GUIDE_PROMPT.strip():
+        prompt = None
+
+    personality = (payload.llm_personality_prompt or "").strip() or None
+    if personality == DEFAULT_PERSONALITY_PROMPT.strip():
+        personality = None
+
+    institutional = None
+    if payload.institutional_info:
+        institutional = {
+            key: str(payload.institutional_info[key]).strip()
+            for key in INSTITUTIONAL_INFO_FIELDS
+            if payload.institutional_info.get(key)
+            and str(payload.institutional_info[key]).strip()
+        } or None
 
     # Reasignar el dict completo para que SQLAlchemy detecte el cambio en JSONB.
     tenant.settings_json = {
         **(tenant.settings_json or {}),
         "conversation_mode": payload.conversation_mode,
         "llm_flow_prompt": prompt,
+        "llm_personality_prompt": personality,
+        "institutional_info": institutional,
         "llm_flow_contract": payload.llm_flow_contract,
         "llm_rewrite_messages": payload.llm_rewrite_messages,
     }
     db.commit()
-    return get_flow_settings(tenant)
+    return _flow_response(tenant)
 
 
 @router.post("/maintenance/backfill-scores")

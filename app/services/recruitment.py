@@ -45,7 +45,12 @@ from app.models import (
     VacancyQuestion,
 )
 from app.services.scoring import classify_candidate, compare_rule, norm, score_answers_from_vacancy_questions, validate_answer
-from app.services.llm_conversation import LlmConversationGuide, get_flow_settings, is_llm_flow_enabled
+from app.services.llm_conversation import (
+    LlmConversationGuide,
+    get_flow_settings,
+    institutional_company_context,
+    is_llm_flow_enabled,
+)
 from app.llm_client import LlmClient
 
 logger = logging.getLogger("recruitment")
@@ -324,6 +329,12 @@ class RecruitmentService:
         state = session.current_state.value if session.current_state else None
         ctx: dict[str, Any] = {"paso_actual": state, "empresa": tenant.name}
 
+        # Informacion institucional del tenant (solo campos con valor), para que
+        # el LLM pueda responder preguntas del candidato sobre la empresa.
+        company_info = institutional_company_context(tenant)
+        if company_info:
+            ctx["empresa_info"] = company_info
+
         if session.current_state == ChatState.SELECT_VACANCY:
             vacancies = db.execute(
                 select(Vacancy.id, Vacancy.title)
@@ -383,6 +394,7 @@ class RecruitmentService:
                 context=context,
                 user_text=event.text or "",
                 custom_prompt=flow["llm_flow_prompt"],
+                custom_personality=flow["llm_personality_prompt"],
                 custom_contract=flow["llm_flow_contract"],
             )
         except Exception:
@@ -398,7 +410,7 @@ class RecruitmentService:
             return self._get_llm_guide().rewrite(
                 messages=messages,
                 context=context,
-                custom_prompt=None,
+                custom_personality=flow["llm_personality_prompt"],
             )
         except Exception:
             logger.exception("Fallo reescribiendo mensajes con LLM; se envian originales")
