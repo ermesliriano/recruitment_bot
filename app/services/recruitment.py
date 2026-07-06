@@ -254,8 +254,26 @@ class RecruitmentService:
         # Flujo guiado por LLM (modo alternativo por tenant): el LLM interpreta
         # el mensaje y lo normaliza para la maquina de estados, o responde con
         # naturalidad si el candidato se desvia. Errores degradan al flujo clasico.
+        # Solo se interpreta en estados donde hay algo que interpretar: en WELCOME
+        # cualquier mensaje debe avanzar el flujo clasico (que muestra la lista REAL
+        # de vacantes); interpretar ahi provoca 'clarify' sin datos y contenido inventado.
+        LLM_INTERPRETABLE_STATES = {
+            ChatState.SELECT_VACANCY,
+            ChatState.CAPTURE_NAME,
+            ChatState.ASK_TENANT_QUESTIONS,
+            ChatState.ASK_VACANCY_QUESTIONS,
+            ChatState.REQUEST_CV,
+            ChatState.SCORING,
+            ChatState.CONFIRM_AND_CLOSE,
+        }
+
         llm_guided = is_llm_flow_enabled(tenant)
-        if llm_guided and event.text and not event.attachments:
+        if (
+            llm_guided
+            and event.text
+            and not event.attachments
+            and session.current_state in LLM_INTERPRETABLE_STATES
+        ):
             guided = self._llm_guide_interpret(db, tenant, session, event)
             if guided:
                 if guided["intent"] == "clarify":
