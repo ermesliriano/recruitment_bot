@@ -536,6 +536,8 @@ class RecruiterCvIntakeService:
             application_id=str(application.id),
             phone_e164=phone_e164,
             vacancy_id=str(vacancy.id),
+            platform=channel_platform,
+            email=(item.detected_email or candidate.email) if job_channel == "email" else None,
         )
 
         application.status = ApplicationStatus.PENDING_AI

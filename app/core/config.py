@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     sendgrid_event_webhook_public_key: str | None = None
     email_default_from: str | None = None
     email_default_from_name: str = "Equipo de Reclutamiento"
+    # Dominio con MX apuntando a SendGrid Inbound Parse (p. ej. reply.cesaria.net).
+    email_inbound_domain: str | None = None
+    email_default_tenant_slug: str | None = None
 
     llm_provider: str = "openai"
     openai_api_key: str = ""

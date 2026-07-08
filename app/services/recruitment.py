@@ -159,21 +159,28 @@ class RecruitmentService:
         application_id,
         phone_e164: str,
         vacancy_id,
+        platform: Platform = Platform.WHATSAPP,
+        email: str | None = None,
     ) -> ConversationSession:
         """Sesión para el flujo outbound (CV subido por el reclutador).
 
         El platform_chat_id debe coincidir EXACTAMENTE con el chat_id que usará
-        el inbound de WhatsApp (from_address = "whatsapp:+<e164>"), para que al
-        responder el candidato _get_or_create_session reutilice esta sesión en
-        lugar de crear una nueva.
+        el inbound del canal (WhatsApp: "whatsapp:+<e164>"; email: la dirección
+        de correo del candidato), para que al responder el candidato
+        _get_or_create_session reutilice esta sesión en lugar de crear una nueva.
         """
-        platform_chat_id = f"whatsapp:{phone_e164}"
+        if platform == Platform.EMAIL:
+            platform_chat_id = (email or "").strip().lower()
+            platform_user_id = platform_chat_id
+        else:
+            platform_chat_id = f"whatsapp:{phone_e164}"
+            platform_user_id = phone_e164
 
         session = db.execute(
             select(ConversationSession)
             .where(
                 ConversationSession.tenant_id == tenant_id,
-                ConversationSession.platform == Platform.WHATSAPP,
+                ConversationSession.platform == platform,
                 ConversationSession.platform_chat_id == platform_chat_id,
                 ConversationSession.is_active.is_(True),
             )
@@ -191,9 +198,9 @@ class RecruitmentService:
 
         session = ConversationSession(
             tenant_id=tenant_id,
-            platform=Platform.WHATSAPP,
+            platform=platform,
             platform_chat_id=platform_chat_id,
-            platform_user_id=phone_e164,
+            platform_user_id=platform_user_id,
             candidate_id=candidate_id,
             application_id=application_id,
             current_state=ChatState.WAITING_CANDIDATE_REPLY,
@@ -463,6 +470,17 @@ class RecruitmentService:
             self._transition(session, ChatState.SELECT_VACANCY)
             return self._show_vacancies(db, tenant, session)
 
+        if event.platform == Platform.EMAIL:
+            # En email no hay teclado de contacto: se pide el telefono por escrito.
+            return [{
+                "text": (
+                    "¡Hola! Gracias por tu interés. Para continuar con tu candidatura "
+                    "necesitamos identificarte: por favor, responde a este correo "
+                    "indicando tu número de teléfono (con prefijo internacional, "
+                    "por ejemplo +18095551234)."
+                ),
+            }]
+
         return [{
             "text": "Hola. Para continuar necesito identificarte por teléfono. Pulsa el botón para compartirlo.",
             "reply_markup": TelegramGateway.phone_keyboard(),
@@ -476,6 +494,16 @@ class RecruitmentService:
                 candidate.telegram_user_id = int(event.user_id) if event.user_id else None
             except (TypeError, ValueError):
                 pass
+        elif event.platform == Platform.EMAIL:
+            if event.from_address:
+                candidate.email = event.from_address.strip().lower()
+            if event.sender_name and not candidate.full_name:
+                # Nombre visible del remitente como pista inicial; el flujo lo
+                # confirmara en CAPTURE_NAME.
+                candidate.metadata_json = {
+                    **(candidate.metadata_json or {}),
+                    "email_display_name": event.sender_name,
+                }
         else:
             candidate.whatsapp_from = event.from_address
             candidate.whatsapp_wa_id = event.user_id
@@ -787,6 +815,10 @@ class RecruitmentService:
         """Descarga el binario del adjunto según el canal.
         Devuelve (bytes, source_file_id, source_file_unique_id).
         """
+        # Canales que entregan el binario inline (p. ej. email via Inbound Parse).
+        if attachment.content is not None:
+            return bytes(attachment.content), attachment.attachment_id, None
+
         if event.platform == Platform.TELEGRAM:
             gateway = TelegramGateway(tenant.telegram_bot_token)
             file_bytes, _ = gateway.get_file_bytes(attachment.attachment_id)

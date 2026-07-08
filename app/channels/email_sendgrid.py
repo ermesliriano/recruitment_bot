@@ -74,11 +74,27 @@ class SendGridEmailGateway:
         }
 
 
+def tenant_inbound_address(tenant) -> str | None:
+    """Direccion del canal inbound del tenant (dominio de Inbound Parse).
+    Prioridad: direccion explicita en settings_json > slug@EMAIL_INBOUND_DOMAIN."""
+    raw = tenant.settings_json or {}
+    explicit = (raw.get("email_inbound_address") or "").strip()
+    if explicit:
+        return explicit
+    if settings.email_inbound_domain and getattr(tenant, "slug", None):
+        return f"{tenant.slug}@{settings.email_inbound_domain}"
+    return None
+
+
 def tenant_email_sender(tenant) -> tuple[str | None, str | None, str | None]:
-    """(from_email, from_name, reply_to) efectivos para un tenant."""
+    """(from_email, from_name, reply_to) efectivos para un tenant.
+
+    El reply_to apunta a la direccion inbound automatica si existe (para que las
+    respuestas del candidato entren al webhook); si no, al correo institucional
+    del tenant (buzon humano)."""
     raw = tenant.settings_json or {}
     from_email = (raw.get("email_from") or settings.email_default_from or "").strip() or None
     from_name = (raw.get("email_from_name") or tenant.name or settings.email_default_from_name or "").strip() or None
     institutional = raw.get("institutional_info") or {}
-    reply_to = (institutional.get("email") or "").strip() or None
+    reply_to = tenant_inbound_address(tenant) or (institutional.get("email") or "").strip() or None
     return from_email, from_name, reply_to
