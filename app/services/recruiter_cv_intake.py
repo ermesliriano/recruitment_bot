@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -8,6 +9,7 @@ from typing import Any
 import phonenumbers
 from sqlalchemy import desc, select
 
+from app.channels.email_sendgrid import SendGridEmailGateway, tenant_email_sender
 from app.cv_pipeline import extract_cv_text, get_storage, next_cv_version, sha256_bytes, validate_cv
 from app.enums import ApplicationOrigin, ApplicationStatus, ChatState, CvParseStatus, Platform
 from app.models import Application, Candidate, CvDocument, Tenant, Vacancy
@@ -15,6 +17,15 @@ from app.models.cv_import import CvImportJob, CvImportJobItem
 from app.services.outbound_message_service import OutboundMessageService
 from app.services.phone_extraction import extract_phone_from_text
 from app.services.recruitment import RecruitmentService
+from app.models.outbound_message import OutboundMessage
+
+
+EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def extract_email_from_text(text: str | None) -> str | None:
+    match = EMAIL_REGEX.search(text or "")
+    return match.group(0).lower() if match else None
 
 
 OPEN_APPLICATION_STATUSES = {
@@ -44,6 +55,7 @@ class RecruiterCvIntakeService:
         self.db = db
         self.recruitment = RecruitmentService()
         self.outbound = OutboundMessageService()
+        self.email_gateway = SendGridEmailGateway()
 
     def create_job(
         self,
@@ -53,7 +65,10 @@ class RecruiterCvIntakeService:
         files: list[ImportedCvFile],
         requested_by: str | None = None,
         scheduled_at: datetime | None = None,
+        channel: str = "whatsapp",
     ) -> CvImportJob:
+        if channel not in ("whatsapp", "email"):
+            raise ValueError(f"Canal de importacion no soportado: {channel}")
         tenant = self.db.execute(
             select(Tenant).where(Tenant.id == tenant_id, Tenant.is_active.is_(True))
         ).scalar_one()
@@ -71,6 +86,7 @@ class RecruiterCvIntakeService:
             total_files=len(files),
             processed_files=0,
             status="scheduled" if deferred else "processing",
+            channel=channel,
             summary_json={"scheduled_at": scheduled_at.isoformat()} if deferred else {},
         )
         self.db.add(job)
@@ -94,9 +110,8 @@ class RecruiterCvIntakeService:
             try:
                 if deferred:
                     # Modo programado: solo validacion + extraccion de texto +
-                    # deteccion de telefono. El resto (candidato, candidatura,
-                    # CV, evaluacion y outbound) se ejecuta a la hora programada.
-                    self._process_one_file_deferred(item=item, imported_file=imported_file)
+                    # deteccion de telefono/email. El resto se ejecuta a la hora prevista.
+                    self._process_one_file_deferred(item=item, imported_file=imported_file, channel=channel)
                 else:
                     self._process_one_file(job=job, item=item, tenant=tenant, vacancy=vacancy, imported_file=imported_file)
             except Exception as exc:
@@ -114,15 +129,16 @@ class RecruiterCvIntakeService:
         self.db.refresh(job)
         return job
 
-    def _process_one_file_deferred(self, *, item: CvImportJobItem, imported_file: ImportedCvFile) -> None:
-        """Procesado minimo para importaciones programadas: detecta el telefono y
-        conserva SIEMPRE el binario para reanudar el procesado a la hora prevista."""
+    def _process_one_file_deferred(self, *, item: CvImportJobItem, imported_file: ImportedCvFile, channel: str = "whatsapp") -> None:
+        """Procesado minimo para importaciones programadas: detecta telefono (y email
+        si el canal es email) y conserva SIEMPRE el binario para reanudar despues."""
         ext = validate_cv(imported_file.filename, imported_file.mime_type, imported_file.size_bytes)
         extracted_text, parse_status = extract_cv_text(ext, imported_file.content)
 
         item.extraction_status = parse_status.value if hasattr(parse_status, "value") else str(parse_status)
         item.extracted_preview = (extracted_text or "")[:2000]
         item.raw_content = imported_file.content
+        item.detected_email = extract_email_from_text(extracted_text)
 
         phone_result = extract_phone_from_text(extracted_text)
         item.phone_candidates_json = phone_result.as_dict()
@@ -134,6 +150,12 @@ class RecruiterCvIntakeService:
             return
 
         item.detected_phone_e164 = phone_result.selected_phone
+
+        if channel == "email" and not item.detected_email:
+            item.status = "email_not_found"
+            item.error_message = "No se detecto una direccion de email en el CV."
+            return
+
         item.error_message = None
         item.status = "scheduled"
 
@@ -411,6 +433,7 @@ class RecruiterCvIntakeService:
 
         item.extraction_status = parse_status.value if hasattr(parse_status, "value") else str(parse_status)
         item.extracted_preview = (extracted_text or "")[:2000]
+        item.detected_email = extract_email_from_text(extracted_text)
 
         phone_result = extract_phone_from_text(extracted_text)
         item.phone_candidates_json = phone_result.as_dict()
@@ -421,6 +444,13 @@ class RecruiterCvIntakeService:
             item.error_message = phone_result.reason
             # Conservamos el binario original del CV para poder reanudar el
             # procesado cuando el reclutador introduzca el teléfono manualmente.
+            item.raw_content = imported_file.content
+            return
+
+        if (job.channel or "whatsapp") == "email" and not item.detected_email:
+            item.status = "email_not_found"
+            item.error_message = "No se detecto una direccion de email en el CV."
+            item.detected_phone_e164 = phone_result.selected_phone
             item.raw_content = imported_file.content
             return
 
@@ -463,7 +493,11 @@ class RecruiterCvIntakeService:
         )
 
         application.origin = ApplicationOrigin.RECRUITER_UPLOAD
-        application.preferred_platform = Platform.WHATSAPP
+        job_channel = (job.channel or "whatsapp")
+        channel_platform = Platform.EMAIL if job_channel == "email" else Platform.WHATSAPP
+        application.preferred_platform = channel_platform
+        if job_channel == "email" and item.detected_email:
+            candidate.email = candidate.email or item.detected_email
 
         version = next_cv_version(self.db, application.id)
         storage, backend_enum = get_storage()
@@ -478,7 +512,7 @@ class RecruiterCvIntakeService:
             extension=ext,
             size_bytes=imported_file.size_bytes,
             sha256=sha256_bytes(imported_file.content),
-            source_platform=Platform.WHATSAPP,
+            source_platform=channel_platform,
             source_file_id=None,
             source_file_unique_id=None,
             source_metadata_json={
@@ -527,6 +561,38 @@ class RecruiterCvIntakeService:
         item.application_reused = application_reused
 
         pending_questions = self.recruitment.count_pending_vacancy_questions(self.db, str(application.id))
+
+        # ── Canal EMAIL: outbound con preguntas agrupadas en un solo correo ────
+        if job_channel == "email":
+            to_email = item.detected_email or candidate.email
+            try:
+                record_status = self._send_outbound_email(
+                    tenant=tenant,
+                    candidate=candidate,
+                    application=application,
+                    session=session,
+                    vacancy=vacancy,
+                    to_email=to_email,
+                    include_questions=pending_questions > 0,
+                )
+                item.outbound_status = record_status
+                if pending_questions == 0 and application.status in {
+                    ApplicationStatus.REVIEW,
+                    ApplicationStatus.INTERVIEW,
+                    ApplicationStatus.SHORTLIST,
+                    ApplicationStatus.REJECTED,
+                }:
+                    item.status = "scoring_completed"
+                else:
+                    application.status = ApplicationStatus.WAITING_CANDIDATE_REPLY
+                    session.current_state = ChatState.WAITING_CANDIDATE_REPLY
+                    item.status = "waiting_reply"
+            except Exception as exc:
+                item.outbound_status = "failed"
+                item.status = "failed"
+                item.error_message = f"Error enviando email: {exc}"
+            self.db.commit()
+            return
 
         if pending_questions == 0 and application.status in {
             ApplicationStatus.REVIEW,
@@ -592,6 +658,170 @@ class RecruiterCvIntakeService:
             candidate.whatsapp_opt_in_status = "granted"
             return True
         return False
+
+    def _send_outbound_email(
+        self,
+        *,
+        tenant,
+        candidate,
+        application,
+        session,
+        vacancy,
+        to_email: str | None,
+        include_questions: bool,
+    ) -> str:
+        """Envia el correo outbound (con las preguntas de la vacante agrupadas si
+        procede) y registra el OutboundMessage. Devuelve el status registrado."""
+        if not to_email:
+            raise ValueError("El candidato no tiene direccion de email.")
+
+        from_email, from_name, reply_to = tenant_email_sender(tenant)
+
+        greeting_name = (candidate.full_name or "").strip()
+        greeting = f"Hola {greeting_name}," if greeting_name else "Hola,"
+
+        lines: list[str] = [
+            greeting,
+            "",
+            f"Hemos recibido tu CV para la vacante \"{vacancy.title}\" de {tenant.name} "
+            "y nos gustaria continuar con tu candidatura.",
+        ]
+
+        questions_block: list[str] = []
+        if include_questions:
+            ordered = self.recruitment._get_ordered_questions(self.db, str(vacancy.id))
+            for idx, (vq, q) in enumerate(ordered, start=1):
+                prompt = vq.prompt_override or q.prompt_text
+                questions_block.append(f"{idx}. {prompt}")
+
+        if questions_block:
+            lines += [
+                "",
+                "Para completar tu postulacion, por favor responde a este correo "
+                "contestando a las siguientes preguntas (puedes responderlas en el "
+                "mismo orden, numeradas):",
+                "",
+                *questions_block,
+            ]
+        else:
+            lines += [
+                "",
+                "Tu candidatura ha quedado registrada. El equipo de Recursos Humanos "
+                "revisara tu perfil y te contactara con los siguientes pasos.",
+            ]
+
+        lines += [
+            "",
+            "Gracias por tu interes.",
+            f"{tenant.name} - Equipo de Reclutamiento",
+        ]
+        text_body = "\n".join(lines)
+        subject = f"Tu candidatura para {vacancy.title} - {tenant.name}"
+
+        record = OutboundMessage(
+            tenant_id=tenant.id,
+            candidate_id=candidate.id,
+            application_id=application.id,
+            conversation_session_id=session.id if session is not None else None,
+            channel=Platform.EMAIL,
+            provider="sendgrid",
+            to_address=to_email,
+            template_sid=None,
+            content_text=text_body,
+            content_variables={"subject": subject},
+            status="queued",
+        )
+        self.db.add(record)
+        self.db.flush()
+
+        try:
+            result = self.email_gateway.send_email(
+                to_email=to_email,
+                subject=subject,
+                text_body=text_body,
+                from_email=from_email,
+                from_name=from_name,
+                reply_to=reply_to,
+            )
+            record.status = "sent"
+            record.sent_at = datetime.now(timezone.utc)
+            record.provider_message_sid = result.get("message_id")
+        except Exception as exc:
+            record.status = "failed"
+            record.error_message = str(exc)[:2000]
+            raise
+        finally:
+            self.db.flush()
+
+        return record.status
+
+    def resolve_email(self, *, tenant_id: str, job_id: str, item_id: str, manual_email: str) -> CvImportJobItem:
+        """Resuelve manualmente el email de un item 'email_not_found' y reanuda el
+        procesado (o lo devuelve a la cola programada si el job esta programado)."""
+        item = self.db.execute(
+            select(CvImportJobItem).where(
+                CvImportJobItem.id == item_id,
+                CvImportJobItem.job_id == job_id,
+                CvImportJobItem.tenant_id == tenant_id,
+            )
+        ).scalar_one()
+
+        if item.status != "email_not_found":
+            raise ValueError("El item no esta pendiente por email no detectado.")
+        if not item.raw_content:
+            raise ValueError(
+                "No se conserva el contenido del CV para reprocesar este item; vuelve a subir el fichero."
+            )
+
+        email = (manual_email or "").strip().lower()
+        if not EMAIL_REGEX.fullmatch(email):
+            raise ValueError("La direccion de email no es valida.")
+
+        job = self.db.execute(
+            select(CvImportJob).where(CvImportJob.id == job_id, CvImportJob.tenant_id == tenant_id)
+        ).scalar_one()
+
+        item.detected_email = email
+        item.error_message = None
+
+        if job.status == "scheduled":
+            item.status = "scheduled"
+            job.summary_json = self._refresh_job_summary(job_id, job=job)
+            self.db.commit()
+            self.db.refresh(item)
+            return item
+
+        vacancy = self.db.execute(
+            select(Vacancy).where(Vacancy.id == job.vacancy_id, Vacancy.tenant_id == tenant_id)
+        ).scalar_one()
+        tenant = self.db.execute(
+            select(Tenant).where(Tenant.id == tenant_id)
+        ).scalar_one()
+
+        imported_file = ImportedCvFile(
+            filename=item.original_filename,
+            mime_type=item.mime_type or "application/octet-stream",
+            content=bytes(item.raw_content),
+        )
+        ext = validate_cv(imported_file.filename, imported_file.mime_type, imported_file.size_bytes)
+        extracted_text, parse_status = extract_cv_text(ext, imported_file.content)
+
+        self._continue_processing(
+            job=job,
+            item=item,
+            tenant=tenant,
+            vacancy=vacancy,
+            imported_file=imported_file,
+            ext=ext,
+            extracted_text=extracted_text,
+            parse_status=parse_status,
+            phone_e164=item.detected_phone_e164,
+        )
+
+        job.summary_json = self._refresh_job_summary(job_id, job=job)
+        self.db.commit()
+        self.db.refresh(item)
+        return item
 
     def _get_or_create_candidate(self, *, tenant_id: str, phone_e164: str) -> tuple[Candidate, bool]:
         candidate = self.db.execute(

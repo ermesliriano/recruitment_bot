@@ -12,6 +12,7 @@ class CvImportItemOut(BaseModel):
     candidate_full_name: str | None = None
     application_id: UUID | None = None
     effective_status: str | None = None
+    detected_email: str | None = None
     original_filename: str
     mime_type: str | None = None
     size_bytes: int | None = None
@@ -33,6 +34,10 @@ class ResolvePhoneIn(BaseModel):
     phone: str
 
 
+class ResolveEmailIn(BaseModel):
+    email: str
+
+
 class CvImportJobOut(BaseModel):
     id: UUID
     tenant_id: UUID
@@ -41,6 +46,7 @@ class CvImportJobOut(BaseModel):
     total_files: int
     processed_files: int
     status: str
+    channel: str = "whatsapp"
     summary_json: dict[str, Any] = Field(default_factory=dict)
     items: list[CvImportItemOut] = Field(default_factory=list)
 

@@ -9,6 +9,7 @@ import enum
 class Platform(str, enum.Enum):
     TELEGRAM = "telegram"
     WHATSAPP = "whatsapp"
+    EMAIL = "email"
 
 
 class VacancyStatus(str, enum.Enum):

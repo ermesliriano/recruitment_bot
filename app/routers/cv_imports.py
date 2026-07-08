@@ -11,7 +11,7 @@ from app.core.security import require_admin_token
 from app.models.application import Application
 from app.models.candidate import Candidate
 from app.models.cv_import import CvImportJobItem
-from app.schemas.cv_import import CvImportJobOut, CvImportItemOut, ResolvePhoneIn
+from app.schemas.cv_import import CvImportJobOut, CvImportItemOut, ResolveEmailIn, ResolvePhoneIn
 from app.services.recruiter_cv_intake import ImportedCvFile, RecruiterCvIntakeService
 
 router = APIRouter(
@@ -90,9 +90,12 @@ async def create_cv_import_job(
     vacancy_id: str = Form(...),
     requested_by: str | None = Form(default=None),
     scheduled_at: str | None = Form(default=None),
+    channel: str = Form(default="whatsapp"),
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    if channel not in ("whatsapp", "email"):
+        raise HTTPException(status_code=422, detail="channel debe ser 'whatsapp' o 'email'.")
     scheduled_dt: datetime | None = None
     if scheduled_at:
         try:
@@ -121,6 +124,7 @@ async def create_cv_import_job(
         files=imported_files,
         requested_by=requested_by,
         scheduled_at=scheduled_dt,
+        channel=channel,
     )
     db.refresh(job)
     job.items = db.execute(
@@ -219,6 +223,28 @@ def resolve_phone(
             job_id=job_id,
             item_id=item_id,
             manual_phone=payload.phone,
+        )
+        _attach_candidate_names(db, [item])
+        return item
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/{job_id}/items/{item_id}/resolve-email", response_model=CvImportItemOut)
+def resolve_cv_import_email(
+    tenant_id: str,
+    job_id: str,
+    item_id: str,
+    payload: ResolveEmailIn,
+    db: Session = Depends(get_db),
+):
+    service = RecruiterCvIntakeService(db)
+    try:
+        item = service.resolve_email(
+            tenant_id=tenant_id,
+            job_id=job_id,
+            item_id=item_id,
+            manual_email=payload.email,
         )
         _attach_candidate_names(db, [item])
         return item

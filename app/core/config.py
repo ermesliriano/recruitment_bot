@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     )
     whatsapp_default_tenant_slug: str | None = None
 
+    # Canal email (Twilio SendGrid)
+    sendgrid_api_key: str = ""
+    sendgrid_inbound_token: str | None = None
+    sendgrid_event_webhook_public_key: str | None = None
+    email_default_from: str | None = None
+    email_default_from_name: str = "Equipo de Reclutamiento"
+
     llm_provider: str = "openai"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"

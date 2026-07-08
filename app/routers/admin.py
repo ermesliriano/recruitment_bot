@@ -47,6 +47,8 @@ class ConversationFlowIn(BaseModel):
 
 class CompanyInfoIn(BaseModel):
     institutional_info: dict[str, Any] | None = None
+    email_from: str | None = None
+    email_from_name: str | None = None
 
 
 def _flow_response(tenant) -> dict[str, Any]:
@@ -119,6 +121,8 @@ def get_company_info(tenant_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
     return {
         "institutional_info": (tenant.settings_json or {}).get("institutional_info") or {},
+        "email_from": (tenant.settings_json or {}).get("email_from") or None,
+        "email_from_name": (tenant.settings_json or {}).get("email_from_name") or None,
         "fields": list(INSTITUTIONAL_INFO_FIELDS),
     }
 
@@ -145,10 +149,14 @@ def update_company_info(
     tenant.settings_json = {
         **(tenant.settings_json or {}),
         "institutional_info": institutional,
+        "email_from": (payload.email_from or "").strip() or None,
+        "email_from_name": (payload.email_from_name or "").strip() or None,
     }
     db.commit()
     return {
         "institutional_info": institutional or {},
+        "email_from": (tenant.settings_json or {}).get("email_from"),
+        "email_from_name": (tenant.settings_json or {}).get("email_from_name"),
         "fields": list(INSTITUTIONAL_INFO_FIELDS),
     }
 
