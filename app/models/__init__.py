@@ -5,6 +5,7 @@ Re-exporta todos los modelos para que cualquier módulo pueda hacer:
 """
 from app.models.application import Answer, Application  # noqa: F401
 from app.models.candidate import Candidate  # noqa: F401
+from app.models.conversation_message import ConversationMessage  # noqa: F401
 from app.models.cv import AiEvaluation, CvDocument  # noqa: F401
 from app.models.cv_import import CvImportJob, CvImportJobItem  # noqa: F401
 from app.models.outbound_message import OutboundMessage  # noqa: F401

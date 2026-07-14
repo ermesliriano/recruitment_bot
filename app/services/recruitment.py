@@ -45,6 +45,7 @@ from app.models import (
     VacancyQuestion,
 )
 from app.services.scoring import classify_candidate, compare_rule, norm, score_answers_from_vacancy_questions, validate_answer
+from app.services.conversation_log import record_incoming
 from app.services.llm_conversation import (
     LlmConversationGuide,
     get_flow_settings,
@@ -241,6 +242,9 @@ class RecruitmentService:
             return []
         session.last_incoming_event_id = event.event_id
         session.last_user_message_at = datetime.now(timezone.utc)
+
+        # Transcripcion: registrar el mensaje entrante del candidato (tras dedupe).
+        record_incoming(db, tenant, event, session)
 
         if session.current_state == ChatState.CONFIRM_AND_CLOSE:
             # Compromiso de cierre: tras completar la postulación, el bot no vuelve

@@ -10,6 +10,7 @@ from app.channels.whatsapp_twilio import TwilioWhatsAppGateway
 from app.enums import Platform
 from app.models.outbound_message import OutboundMessage
 from app.models.session import ConversationSession
+from app.services.conversation_log import record_outgoing_direct
 from app.telegram_api import TelegramGateway
 
 
@@ -50,6 +51,32 @@ class OutboundMessageService:
             record.status = result.get("status") or "sent"
             record.sent_at = datetime.now(timezone.utc)
             db.flush()
+
+            # Transcripcion: registrar el saliente directo con la MISMA clave de
+            # hilo que usara el inbound del canal, para que queden en un hilo unico.
+            if message.platform == Platform.WHATSAPP:
+                thread_id = f"whatsapp:{message.to_user_id}"
+            else:
+                thread_id = str(message.to_user_id)
+            text = message.text
+            if not text and message.template_sid:
+                variables = message.template_variables or {}
+                text = (
+                    f"[Plantilla inicial] Hola {variables.get('1', 'candidato/a')}, "
+                    f"te contactamos por la vacante {variables.get('2', '')}."
+                ).strip()
+            record_outgoing_direct(
+                db,
+                tenant_id=tenant.id,
+                platform=message.platform,
+                platform_chat_id=thread_id,
+                text=text,
+                candidate_id=message.metadata.get("candidate_id"),
+                application_id=message.metadata.get("application_id"),
+                session_id=message.metadata.get("conversation_session_id"),
+                message_type="template" if message.template_sid else "text",
+                external_id=record.provider_message_sid,
+            )
             return record
 
         except Exception as exc:

@@ -21,6 +21,7 @@ from app.enums import ChatState, Platform
 from app.models.session import ConversationSession
 from app.models.tenant import Tenant
 from app.services.outbound_message_service import OutboundMessageService
+from app.services.conversation_log import record_outgoing_batch
 from app.services.phone_extraction import extract_phone_from_text
 from app.services.recruitment import RecruitmentService
 from app.telegram_api import TelegramGateway, parse_telegram_update
@@ -122,6 +123,7 @@ async def telegram_webhook(
 
         service = RecruitmentService()
         outgoing = service.dispatch(db, tenant, event, background_tasks)
+        record_outgoing_batch(db, tenant, event, outgoing)
         db.commit()
 
         old_event = parse_telegram_update(payload)
@@ -200,6 +202,7 @@ async def whatsapp_webhook(
 
         service = RecruitmentService()
         outgoing = service.dispatch(db, tenant, event, background_tasks)
+        record_outgoing_batch(db, tenant, event, outgoing)
         db.commit()
 
         log_event(
@@ -496,6 +499,7 @@ async def email_webhook(
         # CV del primer correo: conservarlo o inyectarlo cuando ya hay candidatura.
         outgoing += _stash_or_inject_cv(db, tenant, service, event, background_tasks)
 
+        record_outgoing_batch(db, tenant, event, outgoing)
         db.commit()
 
         _deliver_email_reply(tenant, event, outgoing)

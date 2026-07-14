@@ -10,9 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.db import get_db
 from app.core.security import require_admin_token
-from app.enums import AiEvalStatus, Classification
+from app.enums import AiEvalStatus, Classification, Platform
 from app.models.application import Application, Answer
 from app.models.candidate import Candidate
+from app.models.conversation_message import ConversationMessage
 from app.models.cv import CvDocument, AiEvaluation
 from app.models.outbound_message import OutboundMessage
 from app.models.question import Question, TenantQuestion, VacancyQuestion
@@ -189,6 +190,138 @@ def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_d
     """Explica por que una candidatura no se puede puntuar (CV, evaluacion IA y
     preguntas obligatorias activas sin responder)."""
     return diagnose_application(db, application_id)
+
+
+# ── Conversaciones con candidatos (transcripcion) ─────────────────────
+
+@router.get("/tenants/{tenant_id}/conversations")
+def list_conversations(tenant_id: str, db: Session = Depends(get_db)):
+    """Hilos de conversacion del tenant (uno por candidato/canal), ordenados por
+    actividad reciente, con el ultimo mensaje como vista previa."""
+    last_messages = db.execute(
+        select(ConversationMessage)
+        .where(ConversationMessage.tenant_id == tenant_id)
+        .distinct(ConversationMessage.platform, ConversationMessage.platform_chat_id)
+        .order_by(
+            ConversationMessage.platform,
+            ConversationMessage.platform_chat_id,
+            ConversationMessage.created_at.desc(),
+        )
+    ).scalars().all()
+
+    threads: list[dict] = []
+    candidate_ids = set()
+    pending_candidate_threads = []
+    for msg in last_messages:
+        entry = {
+            "platform": msg.platform.value,
+            "chat_id": msg.platform_chat_id,
+            "candidate_id": str(msg.candidate_id) if msg.candidate_id else None,
+            "application_id": str(msg.application_id) if msg.application_id else None,
+            "last_message_text": msg.message_text,
+            "last_message_type": msg.message_type,
+            "last_message_direction": msg.direction,
+            "last_message_at": msg.created_at.isoformat() if msg.created_at else None,
+        }
+        if msg.candidate_id:
+            candidate_ids.add(msg.candidate_id)
+        else:
+            pending_candidate_threads.append(entry)
+        threads.append(entry)
+
+    # Hilos cuyo ultimo mensaje no lleva candidato: buscar el ultimo mensaje del
+    # hilo que si lo tenga (p. ej. los primeros correos previos a crear candidato).
+    if pending_candidate_threads:
+        rows = db.execute(
+            select(ConversationMessage)
+            .where(
+                ConversationMessage.tenant_id == tenant_id,
+                ConversationMessage.candidate_id.is_not(None),
+            )
+            .distinct(ConversationMessage.platform, ConversationMessage.platform_chat_id)
+            .order_by(
+                ConversationMessage.platform,
+                ConversationMessage.platform_chat_id,
+                ConversationMessage.created_at.desc(),
+            )
+        ).scalars().all()
+        by_key = {(r.platform.value, r.platform_chat_id): r for r in rows}
+        for entry in pending_candidate_threads:
+            row = by_key.get((entry["platform"], entry["chat_id"]))
+            if row is not None:
+                entry["candidate_id"] = str(row.candidate_id)
+                candidate_ids.add(row.candidate_id)
+
+    names: dict = {}
+    if candidate_ids:
+        rows = db.execute(
+            select(Candidate.id, Candidate.full_name, Candidate.phone_e164).where(
+                Candidate.id.in_(candidate_ids)
+            )
+        ).all()
+        names = {str(cid): {"full_name": name, "phone": phone} for cid, name, phone in rows}
+
+    for entry in threads:
+        info = names.get(entry["candidate_id"] or "") or {}
+        entry["candidate_full_name"] = info.get("full_name")
+        entry["candidate_phone"] = info.get("phone")
+
+    threads.sort(key=lambda t: t["last_message_at"] or "", reverse=True)
+    return {"total": len(threads), "items": threads}
+
+
+@router.get("/tenants/{tenant_id}/conversations/messages")
+def conversation_messages(
+    tenant_id: str,
+    platform: str,
+    chat_id: str,
+    limit: int = 100,
+    before: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Mensajes de un hilo, en orden cronologico ascendente. Paginacion hacia
+    atras con ?before=<ISO timestamp> (devuelve los `limit` anteriores)."""
+    limit = max(1, min(limit, 500))
+
+    try:
+        platform_enum = Platform(platform.strip().lower())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Plataforma no valida: {platform}")
+
+    stmt = (
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.tenant_id == tenant_id,
+            ConversationMessage.platform == platform_enum,
+            ConversationMessage.platform_chat_id == chat_id,
+        )
+        .order_by(ConversationMessage.created_at.desc())
+        .limit(limit)
+    )
+    if before:
+        stmt = stmt.where(ConversationMessage.created_at < before)
+
+    rows = db.execute(stmt).scalars().all()
+    rows.reverse()  # ascendente, para pintar como chat
+
+    return {
+        "platform": platform,
+        "chat_id": chat_id,
+        "count": len(rows),
+        "items": [
+            {
+                "id": str(m.id),
+                "direction": m.direction,
+                "text": m.message_text,
+                "type": m.message_type,
+                "attachment_filename": m.attachment_filename,
+                "candidate_id": str(m.candidate_id) if m.candidate_id else None,
+                "application_id": str(m.application_id) if m.application_id else None,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in rows
+        ],
+    }
 
 
 # Etiqueta legible del punto del flujo en que se quedó una candidatura incompleta.

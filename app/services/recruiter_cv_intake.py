@@ -15,6 +15,7 @@ from app.enums import ApplicationOrigin, ApplicationStatus, ChatState, CvParseSt
 from app.models import Application, Candidate, CvDocument, Tenant, Vacancy
 from app.models.cv_import import CvImportJob, CvImportJobItem
 from app.services.outbound_message_service import OutboundMessageService
+from app.services.conversation_log import record_outgoing_direct
 from app.services.phone_extraction import extract_phone_from_text
 from app.services.recruitment import RecruitmentService
 from app.models.outbound_message import OutboundMessage
@@ -748,6 +749,19 @@ class RecruiterCvIntakeService:
             record.status = "sent"
             record.sent_at = datetime.now(timezone.utc)
             record.provider_message_sid = result.get("message_id")
+            # Transcripcion: el hilo de email usa la direccion del candidato.
+            record_outgoing_direct(
+                self.db,
+                tenant_id=tenant.id,
+                platform=Platform.EMAIL,
+                platform_chat_id=(to_email or "").strip().lower(),
+                text=f"[{subject}]\n\n{text_body}",
+                candidate_id=candidate.id,
+                application_id=application.id,
+                session_id=session.id if session is not None else None,
+                message_type="template",
+                external_id=record.provider_message_sid,
+            )
         except Exception as exc:
             record.status = "failed"
             record.error_message = str(exc)[:2000]
