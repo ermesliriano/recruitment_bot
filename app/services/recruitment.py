@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -242,7 +242,18 @@ class RecruitmentService:
         session.last_incoming_event_id = event.event_id
         session.last_user_message_at = datetime.now(timezone.utc)
 
-        if session.current_state == ChatState.CONFIRM_AND_CLOSE and self._wants_restart(event.text):
+        if session.current_state == ChatState.CONFIRM_AND_CLOSE:
+            # Compromiso de cierre: tras completar la postulación, el bot no vuelve
+            # a interactuar durante el MISMO DIA (silencio total, ni siquiera ante
+            # "empezar"). A partir del dia siguiente, cualquier mensaje reinicia el
+            # flujo como de costumbre. El dia se calcula en hora local de RD (UTC-4).
+            local_tz = timezone(timedelta(hours=-4))
+            today_local = datetime.now(local_tz).date().isoformat()
+            completed_on = (session.state_payload or {}).get("completed_on")
+
+            if completed_on == today_local:
+                return []
+
             self._transition(session, ChatState.SELECT_VACANCY)
             messages = self._show_vacancies(db, tenant, session)
             if is_llm_flow_enabled(tenant):
@@ -279,7 +290,6 @@ class RecruitmentService:
             ChatState.ASK_VACANCY_QUESTIONS,
             ChatState.REQUEST_CV,
             ChatState.SCORING,
-            ChatState.CONFIRM_AND_CLOSE,
         }
 
         llm_guided = is_llm_flow_enabled(tenant)
@@ -312,7 +322,6 @@ class RecruitmentService:
             ChatState.REQUEST_CV: self._handle_request_cv,
             ChatState.ASK_VACANCY_QUESTIONS: self._handle_ask_questions,
             ChatState.SCORING: lambda db, t, s, e: [{"text": "Estoy evaluando tu candidatura. Te escribiré en breve."}],
-            ChatState.CONFIRM_AND_CLOSE: lambda db, t, s, e: [{"text": "Tu postulación ya está completa. Si deseas postular a otra vacante activa, escribe \"empezar\"."}],
         }
 
         handler = handlers.get(session.current_state)
@@ -647,8 +656,7 @@ class RecruitmentService:
             session.state_payload = {"vacancies_shown": False}
             return [{"text": (
                 f"Ya tienes una candidatura registrada para *{vacancy.title}*, así que no la dupliquemos. "
-                "Nuestro equipo de RRHH la revisará y te contactará. "
-                "Si quieres postular a otra vacante, escribe \"empezar\"."
+                "El equipo de Recursos Humanos la revisará y se pondrá en contacto contigo pronto."
             )}]
 
         if existing:
@@ -1410,6 +1418,11 @@ class RecruitmentService:
             }[classification]
 
             self._transition(session, ChatState.CONFIRM_AND_CLOSE)
+            # Fecha (dia local RD) de finalizacion: gobierna el silencio del mismo dia.
+            session.state_payload = {
+                **(session.state_payload or {}),
+                "completed_on": datetime.now(timezone(timedelta(hours=-4))).date().isoformat(),
+            }
             log_event(db=db, level="INFO", source="scoring", event="SCORING_COMPLETE",
                       payload={"score_total": float(total), "classification": classification.value},
                       application_id=app.id)
@@ -1418,9 +1431,8 @@ class RecruitmentService:
             return [{"text": (
                 "¡Gracias por completar tu postulación y por responder a las preguntas! "
                 "Hemos recibido correctamente tu información y tu CV.\n\n"
-                "El equipo de RRHH revisará tu candidatura y te contactará próximamente "
-                "para darte feedback sobre los siguientes pasos.\n\n"
-                "Si quieres postular a otra vacante activa, escribe \"empezar\" cuando quieras."
+                "El equipo de Recursos Humanos revisará tu candidatura y se pondrá en "
+                "contacto contigo pronto para informarte sobre los siguientes pasos."
             )}]
         except Exception as e:
             log_event(db=db, level="ERROR", source="scoring", event="SCORING_EXCEPTION",
