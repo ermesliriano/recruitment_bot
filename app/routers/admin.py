@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.db import get_db
 from app.core.security import require_admin_token
+from app.channels.base import OutgoingMessage
+from app.channels.email_sendgrid import SendGridEmailGateway, tenant_email_sender, tenant_inbound_address
 from app.enums import AiEvalStatus, Classification, Platform
 from app.models.application import Application, Answer
 from app.models.candidate import Candidate
@@ -23,6 +25,8 @@ from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
 from app.services.score_backfill import backfill_scores, diagnose_application
+from app.services.conversation_log import record_outgoing_direct
+from app.services.outbound_message_service import OutboundMessageService
 from app.services.llm_conversation import (
     DEFAULT_CONTRACT,
     DEFAULT_GUIDE_PROMPT,
@@ -321,6 +325,101 @@ def conversation_messages(
             }
             for m in rows
         ],
+    }
+
+
+class SendConversationMessageIn(BaseModel):
+    platform: str
+    chat_id: str
+    text: str
+
+
+@router.post("/tenants/{tenant_id}/conversations/messages")
+def send_conversation_message(
+    tenant_id: str,
+    payload: SendConversationMessageIn,
+    db: Session = Depends(get_db),
+):
+    """Envia un mensaje del reclutador al candidato por el canal del hilo y lo
+    registra en la transcripcion. WhatsApp exige ventana de 24h abierta."""
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="El mensaje no puede estar vacio.")
+
+    try:
+        platform_enum = Platform(payload.platform.strip().lower())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Plataforma no valida: {payload.platform}")
+
+    tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+
+    chat_id = payload.chat_id.strip()
+    session = db.execute(
+        select(ConversationSession).where(
+            ConversationSession.tenant_id == tenant.id,
+            ConversationSession.platform == platform_enum,
+            ConversationSession.platform_chat_id == chat_id,
+            ConversationSession.is_active.is_(True),
+        )
+    ).scalar_one_or_none()
+
+    if platform_enum == Platform.EMAIL:
+        from_email, from_name, _ = tenant_email_sender(tenant)
+        reply_to = tenant_inbound_address(tenant)
+        try:
+            SendGridEmailGateway().send_email(
+                to_email=chat_id,
+                subject=f"Mensaje de {tenant.name}",
+                text_body=text,
+                from_email=from_email,
+                from_name=from_name,
+                reply_to=reply_to,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"No se pudo enviar el email: {exc}")
+        record_outgoing_direct(
+            db,
+            tenant_id=tenant.id,
+            platform=Platform.EMAIL,
+            platform_chat_id=chat_id.lower(),
+            text=text,
+            candidate_id=session.candidate_id if session else None,
+            application_id=session.application_id if session else None,
+            session_id=session.id if session else None,
+        )
+        db.commit()
+    else:
+        # WhatsApp/Telegram via OutboundMessageService (valida la ventana de 24h
+        # de WhatsApp para mensajes libres y registra la transcripcion).
+        to_user_id = chat_id.removeprefix("whatsapp:") if platform_enum == Platform.WHATSAPP else chat_id
+        message = OutgoingMessage(
+            platform=platform_enum,
+            to_user_id=to_user_id,
+            text=text,
+            metadata={
+                "candidate_id": str(session.candidate_id) if session and session.candidate_id else None,
+                "application_id": str(session.application_id) if session and session.application_id else None,
+                "conversation_session_id": str(session.id) if session else None,
+            },
+        )
+        try:
+            OutboundMessageService().deliver(db, tenant, message)
+            db.commit()
+        except RuntimeError as exc:
+            db.rollback()
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"No se pudo enviar el mensaje: {exc}")
+
+    return {
+        "ok": True,
+        "platform": platform_enum.value,
+        "chat_id": chat_id,
+        "direction": "out",
+        "text": text,
     }
 
 
