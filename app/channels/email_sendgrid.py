@@ -75,12 +75,15 @@ class SendGridEmailGateway:
 
 
 def tenant_inbound_address(tenant) -> str | None:
-    """Direccion del canal inbound del tenant (dominio de Inbound Parse).
-    Prioridad: direccion explicita en settings_json > slug@EMAIL_INBOUND_DOMAIN."""
+    """Direccion del canal inbound del tenant.
+    Prioridad: direccion explicita del tenant > direccion GLOBAL de la plataforma
+    (EMAIL_INBOUND_ADDRESS) > slug@EMAIL_INBOUND_DOMAIN."""
     raw = tenant.settings_json or {}
     explicit = (raw.get("email_inbound_address") or "").strip()
     if explicit:
         return explicit
+    if settings.email_inbound_address:
+        return settings.email_inbound_address.strip()
     if settings.email_inbound_domain and getattr(tenant, "slug", None):
         return f"{tenant.slug}@{settings.email_inbound_domain}"
     return None

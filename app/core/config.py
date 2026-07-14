@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     email_default_from_name: str = "Equipo de Reclutamiento"
     # Dominio con MX apuntando a SendGrid Inbound Parse (p. ej. reply.cesaria.net).
     email_inbound_domain: str | None = None
+    # Direccion inbound GLOBAL de la plataforma (p. ej. rrhh@reply.cesaria.net):
+    # todos los tenants reciben ahi; el tenant se resuelve por defecto.
+    email_inbound_address: str | None = None
     email_default_tenant_slug: str | None = None
 
     llm_provider: str = "openai"
