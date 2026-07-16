@@ -199,10 +199,16 @@ def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_d
 # ── Conversaciones con candidatos (transcripcion) ─────────────────────
 
 @router.get("/tenants/{tenant_id}/conversations")
-def list_conversations(tenant_id: str, db: Session = Depends(get_db)):
-    """Hilos de conversacion del tenant (uno por candidato/canal), ordenados por
-    actividad reciente, con el ultimo mensaje como vista previa."""
-    last_messages = db.execute(
+def list_conversations(
+    tenant_id: str,
+    vacancy_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Hilos de conversacion del tenant, ordenados por actividad reciente, con
+    el ultimo mensaje como vista previa. Con vacancy_id, solo los hilos de
+    candidatos con candidatura en esa vacante (los hilos aun sin candidatura
+    asociada no aparecen al filtrar)."""
+    stmt = (
         select(ConversationMessage)
         .where(ConversationMessage.tenant_id == tenant_id)
         .distinct(ConversationMessage.platform, ConversationMessage.platform_chat_id)
@@ -211,7 +217,33 @@ def list_conversations(tenant_id: str, db: Session = Depends(get_db)):
             ConversationMessage.platform_chat_id,
             ConversationMessage.created_at.desc(),
         )
-    ).scalars().all()
+    )
+
+    if vacancy_id:
+        # Claves de hilo (platform, chat_id) con al menos un mensaje ligado a una
+        # candidatura de la vacante indicada.
+        thread_keys = (
+            select(
+                ConversationMessage.platform.label("platform"),
+                ConversationMessage.platform_chat_id.label("platform_chat_id"),
+            )
+            .join(Application, Application.id == ConversationMessage.application_id)
+            .where(
+                ConversationMessage.tenant_id == tenant_id,
+                Application.vacancy_id == vacancy_id,
+            )
+            .distinct()
+            .subquery()
+        )
+        stmt = stmt.join(
+            thread_keys,
+            and_(
+                ConversationMessage.platform == thread_keys.c.platform,
+                ConversationMessage.platform_chat_id == thread_keys.c.platform_chat_id,
+            ),
+        )
+
+    last_messages = db.execute(stmt).scalars().all()
 
     threads: list[dict] = []
     candidate_ids = set()
