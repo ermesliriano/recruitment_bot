@@ -554,6 +554,7 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
             Vacancy.title.label("vacante"),
             Application.origin.label("origin"),
             Application.preferred_platform.label("channel"),
+            Application.created_at.label("applied_at"),
             last_outbound.status.label("outbound_status"),
             Application.score_rules,
             Application.score_cv,
@@ -594,6 +595,7 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
             score_total=float(r.score_total) if r.score_total is not None else None,
             estado=r.estado.value if r.estado else None,
             stage=_incomplete_stage_label(r.session_state, r.app_status),
+            applied_at=r.applied_at.isoformat() if r.applied_at else None,
         ).model_dump()
 
     # Candidaturas completadas (ya evaluadas, con score_total): el ranking real.
@@ -617,12 +619,22 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
         )
     ).all()
 
+    # Presupuesto de puntuacion de la vacante (para mostrar "x / max").
+    vacancy_budget = db.execute(
+        select(Vacancy.cv_max_score).where(
+            Vacancy.id == vacancy_id, Vacancy.tenant_id == tenant_id
+        )
+    ).scalar_one_or_none()
+    cv_max = float(vacancy_budget) if vacancy_budget is not None else None
+
     return {
         "vacancy_id": vacancy_id,
         "total": len(completed),
         "items": [_to_row(r) for r in completed],
         "incomplete_total": len(incomplete),
         "incomplete": [_to_row(r) for r in incomplete],
+        "cv_max_score": cv_max,
+        "questions_max_score": (100 - cv_max) if cv_max is not None else None,
     }
 
 
