@@ -39,6 +39,14 @@ from app.core.config import settings
 CONVERSATION_MODE_CLASSIC = "classic"
 CONVERSATION_MODE_LLM = "llm"
 
+# Comportamiento tras completar la postulacion:
+#  - silent_forever (default): el bot no vuelve a responder a ese candidato en
+#    ese canal (el reclutador siempre puede re-engancharlo via outbound).
+#  - reopen_next_day: silencio el mismo dia; desde el dia siguiente cualquier
+#    mensaje reinicia el flujo mostrando las vacantes.
+POST_COMPLETION_SILENT = "silent_forever"
+POST_COMPLETION_REOPEN_NEXT_DAY = "reopen_next_day"
+
 # Campos admitidos en la informacion institucional del tenant.
 INSTITUTIONAL_INFO_FIELDS = (
     "name",
@@ -56,6 +64,9 @@ INSTITUTIONAL_INFO_FIELDS = (
 
 def get_flow_settings(tenant) -> dict[str, Any]:
     raw = tenant.settings_json or {}
+    post_completion = raw.get("post_completion_mode")
+    if post_completion not in (POST_COMPLETION_SILENT, POST_COMPLETION_REOPEN_NEXT_DAY):
+        post_completion = POST_COMPLETION_SILENT
     return {
         "conversation_mode": raw.get("conversation_mode") or CONVERSATION_MODE_CLASSIC,
         "llm_flow_prompt": raw.get("llm_flow_prompt") or None,
@@ -63,6 +74,7 @@ def get_flow_settings(tenant) -> dict[str, Any]:
         "institutional_info": raw.get("institutional_info") or None,
         "llm_flow_contract": raw.get("llm_flow_contract") or None,
         "llm_rewrite_messages": bool(raw.get("llm_rewrite_messages", True)),
+        "post_completion_mode": post_completion,
     }
 
 

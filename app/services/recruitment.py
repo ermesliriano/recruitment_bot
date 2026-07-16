@@ -48,6 +48,7 @@ from app.services.scoring import classify_candidate, compare_rule, norm, score_a
 from app.services.conversation_log import record_incoming
 from app.services.llm_conversation import (
     LlmConversationGuide,
+    POST_COMPLETION_REOPEN_NEXT_DAY,
     get_flow_settings,
     institutional_company_context,
     is_llm_flow_enabled,
@@ -247,10 +248,16 @@ class RecruitmentService:
         record_incoming(db, tenant, event, session)
 
         if session.current_state == ChatState.CONFIRM_AND_CLOSE:
-            # Compromiso de cierre: tras completar la postulación, el bot no vuelve
-            # a interactuar durante el MISMO DIA (silencio total, ni siquiera ante
-            # "empezar"). A partir del dia siguiente, cualquier mensaje reinicia el
-            # flujo como de costumbre. El dia se calcula en hora local de RD (UTC-4).
+            # Comportamiento tras completar la postulacion (configurable por tenant):
+            #  - silent_forever (default): el bot no vuelve a interactuar con el
+            #    candidato en este canal.
+            #  - reopen_next_day: silencio total el MISMO DIA (ni siquiera ante
+            #    "empezar"); a partir del dia siguiente cualquier mensaje reinicia
+            #    el flujo. El dia se calcula en hora local de RD (UTC-4).
+            flow = get_flow_settings(tenant)
+            if flow["post_completion_mode"] != POST_COMPLETION_REOPEN_NEXT_DAY:
+                return []
+
             local_tz = timezone(timedelta(hours=-4))
             today_local = datetime.now(local_tz).date().isoformat()
             completed_on = (session.state_payload or {}).get("completed_on")

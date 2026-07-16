@@ -48,6 +48,7 @@ class ConversationFlowIn(BaseModel):
     llm_personality_prompt: str | None = None
     llm_flow_contract: dict[str, Any] | None = None
     llm_rewrite_messages: bool = True
+    post_completion_mode: Literal["silent_forever", "reopen_next_day"] = "silent_forever"
 
 
 class CompanyInfoIn(BaseModel):
@@ -114,6 +115,7 @@ def update_conversation_flow(
         "llm_personality_prompt": personality,
         "llm_flow_contract": payload.llm_flow_contract,
         "llm_rewrite_messages": payload.llm_rewrite_messages,
+        "post_completion_mode": payload.post_completion_mode,
     }
     db.commit()
     return _flow_response(tenant)
