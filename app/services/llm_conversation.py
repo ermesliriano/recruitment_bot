@@ -47,18 +47,43 @@ CONVERSATION_MODE_LLM = "llm"
 POST_COMPLETION_SILENT = "silent_forever"
 POST_COMPLETION_REOPEN_NEXT_DAY = "reopen_next_day"
 
-# Campos admitidos en la informacion institucional del tenant.
+# Campos admitidos en la informacion institucional del tenant. Ampliar esta
+# tupla habilita el campo en el endpoint company-info Y en el contexto que
+# recibe Maria (institutional_company_context) a la vez.
 INSTITUTIONAL_INFO_FIELDS = (
+    # Informacion general
     "name",
     "description",
     "industry",
+    "industry_other",
+    # Contacto y ubicacion
+    "country",
+    "province",
+    "city",
+    "address",
     "location",
+    "phone",
+    "whatsapp",
+    "email",
+    "schedule",
+    # Presencia digital
     "website",
     "instagram",
     "facebook",
     "linkedin",
-    "email",
-    "phone",
+    "tiktok",
+    "other_url",
+    # Cultura y propuesta laboral
+    "about",
+    "culture",
+    "values",
+    "benefits",
+    "work_mode",
+    "dress_code",
+    "selection_process",
+    "start_date",
+    "remote_policy",
+    "growth",
 )
 
 

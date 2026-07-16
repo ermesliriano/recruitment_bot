@@ -716,8 +716,11 @@ class RecruiterCvIntakeService:
         lines += [
             "",
             "Gracias por tu interes.",
-            f"{tenant.name} - Equipo de Reclutamiento",
         ]
+        # Firma configurada por la empresa (Perfil de la empresa > Correo de
+        # reclutamiento); si no existe, firma generica.
+        signature = (tenant.settings_json or {}).get("email_signature")
+        lines.append(signature or f"{tenant.name} - Equipo de Reclutamiento")
         text_body = "\n".join(lines)
         subject = f"Tu candidatura para {vacancy.title} - {tenant.name}"
 

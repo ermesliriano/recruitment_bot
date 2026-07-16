@@ -55,6 +55,9 @@ class CompanyInfoIn(BaseModel):
     institutional_info: dict[str, Any] | None = None
     email_from: str | None = None
     email_from_name: str | None = None
+    email_reply_to: str | None = None
+    email_subject_default: str | None = None
+    email_signature: str | None = None
 
 
 def _flow_response(tenant) -> dict[str, Any]:
@@ -126,12 +129,7 @@ def get_company_info(tenant_id: str, db: Session = Depends(get_db)):
     tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
-    return {
-        "institutional_info": (tenant.settings_json or {}).get("institutional_info") or {},
-        "email_from": (tenant.settings_json or {}).get("email_from") or None,
-        "email_from_name": (tenant.settings_json or {}).get("email_from_name") or None,
-        "fields": list(INSTITUTIONAL_INFO_FIELDS),
-    }
+    return _company_info_response(tenant)
 
 
 @router.put("/tenants/{tenant_id}/company-info")
@@ -158,12 +156,26 @@ def update_company_info(
         "institutional_info": institutional,
         "email_from": (payload.email_from or "").strip() or None,
         "email_from_name": (payload.email_from_name or "").strip() or None,
+        # Correo para respuestas: sobrescribe la direccion inbound del canal.
+        "email_inbound_address": (payload.email_reply_to or "").strip() or None,
+        "email_subject_default": (payload.email_subject_default or "").strip() or None,
+        "email_signature": (payload.email_signature or "").strip() or None,
     }
     db.commit()
+    return _company_info_response(tenant, institutional)
+
+
+def _company_info_response(tenant, institutional=None) -> dict[str, Any]:
+    raw = tenant.settings_json or {}
+    if institutional is None:
+        institutional = raw.get("institutional_info") or {}
     return {
         "institutional_info": institutional or {},
-        "email_from": (tenant.settings_json or {}).get("email_from"),
-        "email_from_name": (tenant.settings_json or {}).get("email_from_name"),
+        "email_from": raw.get("email_from"),
+        "email_from_name": raw.get("email_from_name"),
+        "email_reply_to": raw.get("email_inbound_address"),
+        "email_subject_default": raw.get("email_subject_default"),
+        "email_signature": raw.get("email_signature"),
         "fields": list(INSTITUTIONAL_INFO_FIELDS),
     }
 
@@ -402,10 +414,11 @@ def send_conversation_message(
     if platform_enum == Platform.EMAIL:
         from_email, from_name, _ = tenant_email_sender(tenant)
         reply_to = tenant_inbound_address(tenant)
+        subject = (tenant.settings_json or {}).get("email_subject_default") or f"Mensaje de {tenant.name}"
         try:
             SendGridEmailGateway().send_email(
                 to_email=chat_id,
-                subject=f"Mensaje de {tenant.name}",
+                subject=subject,
                 text_body=text,
                 from_email=from_email,
                 from_name=from_name,
