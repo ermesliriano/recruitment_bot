@@ -872,7 +872,12 @@ class RecruitmentService:
             source_platform=event.platform,
             source_file_id=source_file_id,
             source_file_unique_id=source_file_unique_id,
-            source_metadata_json={"source": f"inbound_{event.platform.value}"},
+            source_metadata_json={
+                "source": f"inbound_{event.platform.value}",
+                # URL de media del proveedor (Twilio) para poder re-descargar el
+                # fichero original como fallback si content no estuviera disponible.
+                **({"media_url": attachment.url} if attachment.url else {}),
+            },
             storage_backend=backend_enum,
             storage_key=storage_key,
             content=content_blob,

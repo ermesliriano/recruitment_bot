@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session, aliased
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 
 from app.core.db import get_db
 from app.core.security import require_admin_token
@@ -636,6 +637,70 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
         "cv_max_score": cv_max,
         "questions_max_score": (100 - cv_max) if cv_max is not None else None,
     }
+
+
+@router.get("/tenants/{tenant_id}/applications/{application_id}/cv-file")
+def application_cv_file(tenant_id: str, application_id: str, db: Session = Depends(get_db)):
+    """Devuelve el fichero ORIGINAL del CV (pdf/imagen/doc) de la candidatura.
+
+    Fuentes, por orden: 1) bytes persistidos en la BD (storage DB_BLOB, el
+    backend por defecto); 2) re-descarga desde Twilio via media_url guardada en
+    metadatos (WhatsApp); 3) re-descarga desde Telegram via file_id. Si ninguna
+    aplica, 404 con mensaje claro."""
+    cv = db.execute(
+        select(CvDocument)
+        .where(
+            CvDocument.tenant_id == tenant_id,
+            CvDocument.application_id == application_id,
+        )
+        .order_by(CvDocument.version.desc(), CvDocument.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    if cv is None:
+        raise HTTPException(status_code=404, detail="Esta candidatura no tiene CV registrado.")
+
+    file_bytes: bytes | None = bytes(cv.content) if cv.content else None
+
+    if file_bytes is None:
+        tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+        media_url = (cv.source_metadata_json or {}).get("media_url")
+        try:
+            if cv.source_platform == Platform.WHATSAPP and media_url and tenant is not None:
+                from app.channels.whatsapp_twilio import TwilioWhatsAppGateway
+
+                file_bytes = TwilioWhatsAppGateway.from_tenant(tenant).download_media(media_url)
+            elif cv.source_platform == Platform.TELEGRAM and cv.source_file_id and tenant is not None:
+                from app.telegram_api import TelegramGateway
+
+                file_bytes, _ = TelegramGateway(tenant.telegram_bot_token).get_file_bytes(cv.source_file_id)
+        except Exception:
+            file_bytes = None
+
+    if file_bytes is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "El fichero original de este CV no está disponible: no hay copia "
+                "almacenada y el proveedor del canal ya no permite recuperarlo."
+            ),
+        )
+
+    # Nombre de fichero seguro para la cabecera (ASCII) + variante UTF-8.
+    raw_name = cv.original_filename or f"cv.{cv.extension or 'pdf'}"
+    ascii_name = raw_name.encode("ascii", "ignore").decode() or f"cv.{cv.extension or 'pdf'}"
+    from urllib.parse import quote
+
+    return Response(
+        content=file_bytes,
+        media_type=cv.mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": (
+                f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(raw_name)}"
+            ),
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 @router.get("/tenants/{tenant_id}/applications/{application_id}", response_model=ApplicationOut)
