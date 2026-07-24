@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
 from app.core.db import get_db
-from app.core.security import require_admin_token
+from app.core.security import require_admin_token, require_superadmin, hash_password
 from app.channels.base import OutgoingMessage
 from app.channels.email_sendgrid import SendGridEmailGateway, tenant_email_sender, tenant_inbound_address
 from app.enums import AiEvalStatus, Classification, Platform
@@ -22,6 +22,7 @@ from app.models.outbound_message import OutboundMessage
 from app.models.question import Question, TenantQuestion, VacancyQuestion
 from app.models.session import ConversationSession
 from app.models.tenant import Tenant
+from app.models.user import User
 from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
@@ -59,6 +60,8 @@ class CompanyInfoIn(BaseModel):
     email_reply_to: str | None = None
     email_subject_default: str | None = None
     email_signature: str | None = None
+    # Numero remitente del canal WhatsApp (Twilio), p. ej. +18095551234.
+    whatsapp_sender: str | None = None
 
 
 def _flow_response(tenant) -> dict[str, Any]:
@@ -162,6 +165,16 @@ def update_company_info(
         "email_subject_default": (payload.email_subject_default or "").strip() or None,
         "email_signature": (payload.email_signature or "").strip() or None,
     }
+
+    # Numero de WhatsApp del canal (columna del tenant, con prefijo whatsapp:).
+    raw_wa = (payload.whatsapp_sender or "").strip()
+    if raw_wa:
+        normalized_wa = raw_wa if raw_wa.startswith("whatsapp:") else f"whatsapp:{raw_wa}"
+        tenant.whatsapp_sender_address = normalized_wa
+        tenant.whatsapp_enabled = True
+    else:
+        tenant.whatsapp_sender_address = None
+
     db.commit()
     return _company_info_response(tenant, institutional)
 
@@ -177,6 +190,7 @@ def _company_info_response(tenant, institutional=None) -> dict[str, Any]:
         "email_reply_to": raw.get("email_inbound_address"),
         "email_subject_default": raw.get("email_subject_default"),
         "email_signature": raw.get("email_signature"),
+        "whatsapp_sender": (tenant.whatsapp_sender_address or "").removeprefix("whatsapp:") or None,
         "fields": list(INSTITUTIONAL_INFO_FIELDS),
     }
 
@@ -637,6 +651,117 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
         "cv_max_score": cv_max,
         "questions_max_score": (100 - cv_max) if cv_max is not None else None,
     }
+
+
+# ── Gestion de empresas y usuarios (solo superadmin) ────────────────
+
+class TenantCreateIn(BaseModel):
+    name: str
+    slug: str | None = None
+
+
+class UserCreateIn(BaseModel):
+    email: str
+    password: str
+    role: Literal["superadmin", "company"]
+    tenant_id: str | None = None
+    full_name: str | None = None
+
+
+def _slugify_tenant(name: str) -> str:
+    import re as _re
+    import unicodedata as _ud
+
+    base = _ud.normalize("NFD", name or "").encode("ascii", "ignore").decode()
+    base = _re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
+    return base[:60] or "empresa"
+
+
+@router.get("/tenants", dependencies=[Depends(require_superadmin)])
+def list_tenants(db: Session = Depends(get_db)):
+    rows = db.execute(
+        select(Tenant.id, Tenant.slug, Tenant.name, Tenant.is_active).order_by(Tenant.name)
+    ).all()
+    return {
+        "items": [
+            {"id": str(tid), "slug": slug, "name": name, "is_active": active}
+            for tid, slug, name, active in rows
+        ]
+    }
+
+
+@router.post("/tenants", dependencies=[Depends(require_superadmin)])
+def create_tenant(payload: TenantCreateIn, db: Session = Depends(get_db)):
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="El nombre de la empresa es obligatorio.")
+
+    slug = (payload.slug or "").strip().lower() or _slugify_tenant(name)
+    existing = db.execute(select(Tenant).where(Tenant.slug == slug)).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=422, detail=f"Ya existe una empresa con el identificador '{slug}'.")
+
+    tenant = Tenant(name=name, slug=slug, settings_json={})
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+    return {"id": str(tenant.id), "slug": tenant.slug, "name": tenant.name, "is_active": tenant.is_active}
+
+
+@router.get("/users", dependencies=[Depends(require_superadmin)])
+def list_users(db: Session = Depends(get_db)):
+    rows = db.execute(select(User).order_by(User.created_at)).scalars().all()
+    tenant_names = {
+        str(tid): name
+        for tid, name in db.execute(select(Tenant.id, Tenant.name)).all()
+    }
+    return {
+        "items": [
+            {
+                "id": str(u.id),
+                "email": u.email,
+                "full_name": u.full_name,
+                "role": u.role,
+                "tenant_id": str(u.tenant_id) if u.tenant_id else None,
+                "tenant_name": tenant_names.get(str(u.tenant_id)) if u.tenant_id else None,
+                "is_active": u.is_active,
+            }
+            for u in rows
+        ]
+    }
+
+
+@router.post("/users", dependencies=[Depends(require_superadmin)])
+def create_user(payload: UserCreateIn, db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="Email no válido.")
+    if len(payload.password or "") < 8:
+        raise HTTPException(status_code=422, detail="La contraseña debe tener al menos 8 caracteres.")
+
+    existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=422, detail="Ya existe un usuario con ese email.")
+
+    tenant_id = (payload.tenant_id or "").strip() or None
+    if payload.role == "company":
+        if not tenant_id:
+            raise HTTPException(status_code=422, detail="Los usuarios de empresa requieren una empresa asignada.")
+        tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+        if tenant is None:
+            raise HTTPException(status_code=404, detail="Empresa no encontrada.")
+
+    user = User(
+        email=email,
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+        tenant_id=tenant_id if payload.role == "company" else None,
+        full_name=(payload.full_name or "").strip() or None,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"id": str(user.id), "email": user.email, "role": user.role}
 
 
 @router.get("/tenants/{tenant_id}/applications/{application_id}/cv-file")

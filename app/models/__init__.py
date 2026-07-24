@@ -13,4 +13,5 @@ from app.models.question import Question, TenantQuestion, VacancyQuestion  # noq
 from app.models.scoring_rule import ScoringRule  # noqa: F401
 from app.models.session import ConversationSession, SystemLog  # noqa: F401
 from app.models.tenant import Tenant  # noqa: F401
+from app.models.user import User  # noqa: F401
 from app.models.vacancy import Vacancy  # noqa: F401

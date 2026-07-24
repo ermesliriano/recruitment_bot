@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     database_url: str
 
     admin_token: str = "change-me"
+    # Secreto de firma de los tokens de usuario (fallback: admin_token).
+    auth_secret: str = ""
     allow_origins: str = "*"
     public_base_url: str | None = None
 

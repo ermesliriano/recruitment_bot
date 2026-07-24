@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.routers import (
     admin,
+    auth,
     cv_imports,
     internal,
     questions,
@@ -29,6 +30,7 @@ app.add_middleware(
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
+app.include_router(auth.router)
 app.include_router(webhook.router)
 app.include_router(cv_imports.router)
 app.include_router(internal.router)
