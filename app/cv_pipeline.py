@@ -2,6 +2,7 @@
 import hashlib
 import io
 import os
+import re
 from pathlib import Path
 
 import phonenumbers
@@ -22,6 +23,11 @@ ALLOWED_MIME = {
     "image/png": ".png",
 }
 ALLOWED_EXT = {".pdf", ".jpg", ".jpeg", ".png"}
+
+# Un PDF puede contener un CV con capa de texto y anexos escaneados. La decisión
+# de usar OCR se toma por página, no por la cantidad total de texto del archivo.
+PDF_PAGE_TEXT_MIN_CHARS = 80
+PDF_OCR_DPI = 200
 
 
 def normalize_phone(raw: str) -> str:
@@ -64,18 +70,86 @@ def validate_cv(filename: str, mime_type: str, size_bytes: int) -> str:
     return ext
 
 
+def _clean_extracted_text(value: str | None) -> str:
+    """Normaliza texto de PDF/OCR sin destruir saltos de línea útiles."""
+    text = (value or "").replace("\x00", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _has_meaningful_page_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    return len(compact) >= PDF_PAGE_TEXT_MIN_CHARS
+
+
+def _ocr_pdf_page(content: bytes, page_number: int) -> str:
+    """Renderiza y procesa una sola página para limitar memoria y tiempo de OCR."""
+    images = convert_from_bytes(
+        content,
+        dpi=PDF_OCR_DPI,
+        first_page=page_number,
+        last_page=page_number,
+    )
+    if not images:
+        return ""
+    return _clean_extracted_text(
+        pytesseract.image_to_string(images[0], lang="spa+eng")
+    )
+
+
 def extract_pdf_text(content: bytes) -> tuple[str, CvParseStatus]:
+    """Extrae todas las páginas y aplica OCR únicamente donde haga falta.
+
+    El comportamiento anterior decidía usar OCR según el texto TOTAL del PDF.
+    Un CV de dos páginas podía superar el umbral y provocar que una licencia,
+    certificado u otro anexo escaneado de páginas posteriores quedara invisible.
+    """
     reader = PdfReader(io.BytesIO(content))
-    text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-    if len(text) >= 200:
-        return text, CvParseStatus.PARSED
-    images = convert_from_bytes(content, dpi=200)
-    ocr_text = "\n".join(
-        pytesseract.image_to_string(img, lang="spa+eng") for img in images
-    ).strip()
-    if ocr_text:
-        return ocr_text, CvParseStatus.OCR_FALLBACK
-    return "", CvParseStatus.FAILED
+    sections: list[str] = []
+    used_ocr = False
+    found_text = False
+
+    for index, page in enumerate(reader.pages, start=1):
+        try:
+            embedded_text = _clean_extracted_text(page.extract_text())
+        except Exception:
+            embedded_text = ""
+
+        page_text = embedded_text
+        source = "texto PDF"
+
+        if not _has_meaningful_page_text(embedded_text):
+            try:
+                ocr_text = _ocr_pdf_page(content, index)
+            except Exception:
+                # Un fallo de OCR en una página no debe descartar el texto de las
+                # demás páginas ni hacer fallar el expediente completo.
+                ocr_text = ""
+
+            if ocr_text:
+                used_ocr = True
+                source = "OCR"
+                # Conserva cualquier fragmento de la capa de texto y añade el OCR.
+                page_text = "\n".join(
+                    part for part in (embedded_text, ocr_text) if part
+                ).strip()
+            elif embedded_text:
+                source = "texto PDF parcial"
+
+        marker = f"===== PÁGINA {index} ({source}) ====="
+        if page_text:
+            found_text = True
+            sections.append(f"{marker}\n{page_text}")
+        else:
+            sections.append(f"{marker}\n[Sin texto reconocido]")
+
+    text = "\n\n".join(sections).strip()
+    if not found_text:
+        return text, CvParseStatus.FAILED
+    if used_ocr:
+        return text, CvParseStatus.OCR_FALLBACK
+    return text, CvParseStatus.PARSED
 
 
 def extract_image_text(content: bytes) -> tuple[str, CvParseStatus]:

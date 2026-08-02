@@ -13,6 +13,73 @@ from app.core.config import settings
 # Límite de caracteres para todos los campos de texto libre devueltos por el LLM.
 # Se aplica como instrucción en el prompt y, de forma defensiva, al validar el payload.
 MAX_FREE_TEXT_CHARS = 200
+PAGE_MARKER_RE = re.compile(r"(?=^===== PÁGINA \d+ \([^)]+\) =====$)", re.MULTILINE)
+TRUNCATION_MARKER = "\n...[CONTENIDO INTERMEDIO RECORTADO POR LÍMITE]...\n"
+
+
+def _clip_preserving_edges(text: str, limit: int) -> str:
+    """Recorta conservando principio y final para no perder anexos o pies de página."""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= len(TRUNCATION_MARKER) + 20:
+        return text[:limit]
+
+    available = limit - len(TRUNCATION_MARKER)
+    head_len = int(available * 0.65)
+    tail_len = available - head_len
+    return text[:head_len] + TRUNCATION_MARKER + text[-tail_len:]
+
+
+def _fit_document_text(value: str | None, char_limit: int) -> str:
+    """Ajusta el expediente al límite garantizando representación de cada página.
+
+    El recorte anterior tomaba únicamente el principio del PDF y podía excluir
+    licencias o certificados situados al final. Cuando existen marcadores de
+    página, el presupuesto se reparte entre todas las páginas y se redistribuye
+    el espacio que dejan libre las páginas cortas.
+    """
+    text = (value or "").strip()
+    if not text or char_limit <= 0:
+        return ""
+    if len(text) <= char_limit:
+        return text
+
+    blocks = [block.strip() for block in PAGE_MARKER_RE.split(text) if block.strip()]
+    if len(blocks) <= 1:
+        return _clip_preserving_edges(text, char_limit)
+
+    separator = "\n\n"
+    content_budget = char_limit - len(separator) * (len(blocks) - 1)
+    if content_budget <= 0:
+        return _clip_preserving_edges(text, char_limit)
+
+    allocations = [0] * len(blocks)
+    remaining = set(range(len(blocks)))
+    remaining_budget = content_budget
+
+    while remaining:
+        share = remaining_budget // len(remaining)
+        completed = {i for i in remaining if len(blocks[i]) <= share}
+        if not completed:
+            ordered = sorted(remaining)
+            for i in ordered:
+                allocations[i] = share
+            for i in ordered[: remaining_budget - share * len(ordered)]:
+                allocations[i] += 1
+            break
+
+        for i in completed:
+            allocations[i] = len(blocks[i])
+            remaining_budget -= allocations[i]
+        remaining -= completed
+
+    fitted = separator.join(
+        _clip_preserving_edges(block, allocations[i])
+        for i, block in enumerate(blocks)
+    )
+    return fitted[:char_limit]
 
 
 def _clip_text(value: Any) -> str | None:
@@ -70,6 +137,7 @@ class LlmEvaluationPayload(BaseModel):
     missing_evidence: list[str] = Field(default_factory=list)
     fit_gaps: list[str] = Field(default_factory=list)
     follow_up_questions: list[str] = Field(default_factory=list)
+    document_inventory: list[str] = Field(default_factory=list)
 
     cv_score_0_10: float = Field(ge=0, le=10)
     recommendation: str
@@ -95,6 +163,7 @@ class LlmEvaluationPayload(BaseModel):
         "missing_evidence",
         "fit_gaps",
         "follow_up_questions",
+        "document_inventory",
         mode="before",
     )
     @classmethod
@@ -116,11 +185,13 @@ class LlmEvaluationPayload(BaseModel):
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 PROMPT_TEMPLATE = """
-Eres un evaluador técnico de CV para procesos de reclutamiento. Tu función es analizar la compatibilidad del candidato con una vacante específica, diferenciando claramente entre información evidenciada en el CV, información declarada por el candidato, información no evidenciada y brechas reales frente al perfil requerido.
+Eres un evaluador técnico de expedientes documentales para procesos de reclutamiento. Tu función es analizar la compatibilidad del candidato con una vacante específica, diferenciando claramente entre información evidenciada en los documentos, información declarada por el candidato, información no evidenciada y brechas reales frente al perfil requerido.
 
-Analiza el CV en relación con la vacante indicada.
+El archivo recibido puede contener un CV y, en páginas posteriores, documentos complementarios no previstos inicialmente: licencia de conducir, cédula, certificados, títulos, cartas u otras evidencias. Debes revisar TODAS las páginas y tratar los anexos como parte del expediente del candidato.
 
-Además de evaluar el CV de forma general, debes revisar si el propio CV contiene información suficiente para responder cada una de las preguntas específicas asociadas a la vacante. Solo responde una pregunta si hay evidencia clara en el CV; si no la hay, márcala como no respondida.
+Analiza el expediente documental completo en relación con la vacante indicada.
+
+Además de evaluar el perfil de forma general, debes revisar si cualquier página del expediente contiene información suficiente para responder cada pregunta específica asociada a la vacante. Solo responde una pregunta si existe evidencia clara en el conjunto de documentos; si no la hay, márcala como no respondida.
 
 También recibirás, si existen, respuestas genéricas del candidato a preguntas globales del tenant. Debes incorporarlas al análisis general del perfil y hacer que influyan en cv_score_0_10.
 
@@ -152,21 +223,27 @@ Devuelve EXCLUSIVAMENTE JSON válido con esta estructura exacta:
       "confidence": 0
     }}
   ],
-  "follow_up_questions": []
+  "follow_up_questions": [],
+  "document_inventory": []
 }}
 
 Reglas generales:
 - cv_score_0_10 debe ser un número entre 0 y 10.
 - recommendation debe ser exactamente uno de: "muy_idoneo", "idoneo", "revisar" o "no_idoneo".
-- candidate_full_name debe ser el nombre y apellidos del candidato tal como aparecen en el CV, o null si no puede determinarse con seguridad.
+- candidate_full_name debe ser el nombre y apellidos del candidato tal como aparecen en el expediente, o null si no puede determinarse con seguridad.
 - No añadas markdown, backticks ni texto fuera del JSON.
-- LÍMITE DE LONGITUD: todos los campos de texto libre (recommended_next_action, human_readable_summary, qualitative_assessment, score_rationale y cada elemento de experience_summary, skills, red_flags, missing_evidence, fit_gaps y follow_up_questions) NO pueden superar los 200 caracteres. Si necesitas resumir, hazlo para respetar ese límite.
+- LÍMITE DE LONGITUD: todos los campos de texto libre (recommended_next_action, human_readable_summary, qualitative_assessment, score_rationale y cada elemento de experience_summary, skills, red_flags, missing_evidence, fit_gaps, follow_up_questions y document_inventory) NO pueden superar los 200 caracteres. Si necesitas resumir, hazlo para respetar ese límite.
+- document_inventory debe enumerar brevemente los tipos de documentos detectados e indicar la página cuando sea posible, por ejemplo: "Página 4: licencia de conducir".
+- Antes de afirmar que falta una licencia, certificado, identificación u otra evidencia, verifica todas las páginas y document_inventory.
+- Una licencia de conducir visible en un anexo constituye evidencia directa de que el candidato aportó una licencia. No afirmes que no hay información sobre ella.
+- No deduzcas categoría, vigencia, restricciones o autenticidad de una licencia salvo que esos datos sean legibles.
+- Los marcadores "PÁGINA N" forman parte del expediente y sirven para citar la procedencia de la evidencia.
 
 Definición de recommendation:
-- "muy_idoneo": el CV evidencia ajuste alto con la vacante y cumple la mayoría de requisitos obligatorios y deseables.
-- "idoneo": el CV evidencia buen ajuste con la vacante, aunque puede tener algunos puntos pendientes de validación.
-- "revisar": el CV muestra señales relevantes para la vacante, pero faltan datos críticos que deben validarse en entrevista o conversación.
-- "no_idoneo": el CV no muestra relación suficiente con la vacante o presenta brechas muy marcadas frente al perfil requerido.
+- "muy_idoneo": el expediente evidencia ajuste alto con la vacante y cumple la mayoría de requisitos obligatorios y deseables.
+- "idoneo": el expediente evidencia buen ajuste con la vacante, aunque puede tener algunos puntos pendientes de validación.
+- "revisar": el expediente muestra señales relevantes para la vacante, pero faltan datos críticos que deben validarse en entrevista o conversación.
+- "no_idoneo": el expediente no muestra relación suficiente con la vacante o presenta brechas muy marcadas frente al perfil requerido.
 
 Guía para cv_score_0_10:
 - 9 a 10: perfil muy idóneo; evidencia directa de experiencia relevante y cumplimiento fuerte de requisitos.
@@ -177,34 +254,35 @@ Guía para cv_score_0_10:
 Reglas sobre respuestas genéricas del candidato:
 - Considéralas declaraciones explícitas del candidato.
 - Úsalas para enriquecer candidate_profile, experience_summary, red_flags, missing_evidence, fit_gaps y cv_score_0_10.
-- Si alguna respuesta contradice el CV, prioriza la respuesta explícita del candidato y registra la inconsistencia en red_flags.
-- Cuando una respuesta genérica del candidato complemente el CV, úsala como declaración explícita, pero diferencia su origen dentro del análisis.
+- Si alguna respuesta contradice el expediente, prioriza la respuesta explícita del candidato y registra la inconsistencia en red_flags.
+- Cuando una respuesta genérica del candidato complemente el expediente, úsala como declaración explícita, pero diferencia su origen dentro del análisis.
 - No las devuelvas dentro de answered_vacancy_questions.
-- Si la información proviene de una respuesta del candidato y no del CV, no debe marcarse como respondida dentro de answered_vacancy_questions, salvo que la pregunta de la vacante también esté evidenciada directamente en el CV.
+- Si la información proviene de una respuesta del candidato y no de los documentos, no debe marcarse como respondida dentro de answered_vacancy_questions, salvo que también esté evidenciada directamente en alguna página del expediente.
 
 Diferencia entre red_flags, missing_evidence y fit_gaps:
 
 - red_flags: alertas negativas reales, tales como contradicciones, información inconsistente, datos dudosos, experiencia incompatible o elementos que puedan representar riesgo para el proceso.
-- missing_evidence: información importante para la vacante que no aparece en el CV ni en las respuestas genéricas del candidato.
+- missing_evidence: información importante para la vacante que no aparece en ninguna página del expediente ni en las respuestas genéricas del candidato.
 - fit_gaps: brechas reales entre el perfil del candidato y los requisitos de la vacante.
 - No incluyas como red_flag una información simplemente no evidenciada.
+- Antes de añadir un elemento a missing_evidence, comprueba todas las páginas y los anexos del expediente.
 
 Reglas para answered_vacancy_questions:
 - Debes devolver UNA entrada por cada pregunta recibida en "Preguntas asociadas a la vacante".
-- is_answered_in_cv=true solo si el CV contiene evidencia clara y directa.
+- is_answered_in_cv=true si cualquier página del expediente contiene evidencia clara y directa; el nombre del campo se conserva por compatibilidad.
 - Si no hay evidencia suficiente, usa is_answered_in_cv=false, normalized_answer=null, evidence=null y confidence=0.
 - confidence debe estar entre 0 y 1.
 - Para answer_type="boolean", normalized_answer debe ser "sí" o "no".
 - Para answer_type="number", normalized_answer debe ser únicamente un número en texto.
-- Para answer_type="text", normalized_answer debe ser una respuesta breve y literal al CV.
+- Para answer_type="text", normalized_answer debe ser una respuesta breve y fiel al expediente.
 - No inventes información.
-- La evidencia debe ser un fragmento breve o resumen del CV que justifique la respuesta.
+- La evidencia debe ser un fragmento breve o resumen del documento que justifique la respuesta e indicar la página cuando sea posible.
 
 Reglas para follow_up_questions:
 
-- Genera preguntas de seguimiento cuando existan requisitos importantes no evidenciados en el CV.
+- Genera preguntas de seguimiento cuando existan requisitos importantes no evidenciados en ninguna página del expediente.
 - Las preguntas deben ser breves, directas y útiles para completar la evaluación.
-- No preguntes información que ya esté claramente respondida en el CV.
+- No preguntes información que ya esté claramente respondida en el CV o en un documento complementario.
 - Prioriza preguntas relacionadas con requisitos obligatorios, disponibilidad, ubicación, experiencia específica, herramientas, movilidad, salario, horario o modalidad de trabajo.
 - Si no hacen falta preguntas adicionales, devuelve un arreglo vacío.
 
@@ -212,7 +290,7 @@ Reglas para human_readable_summary, qualitative_assessment y score_rationale:
 
 - human_readable_summary debe ser un resumen ejecutivo de una o dos frases.
 - qualitative_assessment debe ser un párrafo claro, profesional y humano que explique el ajuste general del candidato frente a la vacante.
-- score_rationale debe explicar por qué se asignó el puntaje, mencionando fortalezas, brechas, información no evidenciada y elementos que influyeron en la recomendación.
+- score_rationale debe explicar por qué se asignó el puntaje, mencionando fortalezas, anexos relevantes, brechas, información no evidenciada y elementos que influyeron en la recomendación.
 - No inventes logros, experiencia ni competencias.
 - Si el perfil tiene potencial pero no cumple completamente, indícalo de forma objetiva.
 - Recuerda el límite de 200 caracteres por campo de texto libre.
@@ -231,7 +309,7 @@ Respuestas genéricas del candidato:
 Preguntas asociadas a la vacante:
 {vacancy_questions_json}
 
-CV del candidato:
+EXPEDIENTE DOCUMENTAL COMPLETO DEL CANDIDATO:
 {cv_text}
 """.strip()
 
@@ -267,6 +345,7 @@ def _normalize_payload(obj: dict) -> dict:
         "missing_evidence",
         "fit_gaps",
         "follow_up_questions",
+        "document_inventory",
     ):
         if not isinstance(obj.get(list_field), list):
             obj[list_field] = []
@@ -307,7 +386,7 @@ class LlmClient:
                 ensure_ascii=False,
                 indent=2,
             ),
-            cv_text=(cv_text or "")[: settings.llm_cv_char_limit],
+            cv_text=_fit_document_text(cv_text, settings.llm_cv_char_limit),
         )
 
         last_error: Exception | None = None
