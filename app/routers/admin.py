@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session, aliased
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
-from app.core.db import get_db
-from app.core.security import require_admin_token
+from app.core.db import get_db, SessionLocal
+from app.core.security import require_admin_token, require_superadmin
 from app.channels.base import OutgoingMessage
 from app.channels.email_sendgrid import SendGridEmailGateway, tenant_email_sender, tenant_inbound_address
 from app.enums import AiEvalStatus, Classification, Platform
@@ -26,6 +26,8 @@ from app.models.vacancy import Vacancy
 from app.schemas.application import ApplicationOut
 from app.schemas.ranking import RankingRow
 from app.services.score_backfill import backfill_scores, diagnose_application
+from app.services.cv_reprocessing import completed_scope, reprocess_one
+from app.services.recruitment import RecruitmentService
 from app.services.conversation_log import record_outgoing_direct
 from app.services.outbound_message_service import OutboundMessageService
 from app.services.llm_conversation import (
@@ -209,6 +211,97 @@ def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_d
     """Explica por que una candidatura no se puede puntuar (CV, evaluacion IA y
     preguntas obligatorias activas sin responder)."""
     return diagnose_application(db, application_id)
+
+
+# ── Reprocesado puntual de evaluaciones de CV completadas ────────────
+# Pensado para entornos como Render free tier, sin Shell ni logs en vivo: el
+# resultado se devuelve DIRECTAMENTE en la respuesta HTTP. Reservado a
+# superadmin. No es idempotente: cada llamada vuelve a invocar al LLM.
+
+@router.get(
+    "/maintenance/cv-reprocess-scope",
+    dependencies=[Depends(require_superadmin)],
+)
+def maintenance_cv_reprocess_scope(
+    reference_application_id: str,
+    db: Session = Depends(get_db),
+):
+    """Dry-run: lista las candidaturas completadas (mismo tenant+vacante que la
+    candidatura de referencia) que --apply reprocesaria. No escribe nada."""
+    try:
+        reference, items, incomplete_count = completed_scope(db, reference_application_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {
+        "tenant_id": str(reference.tenant_id),
+        "vacancy_id": str(reference.vacancy_id),
+        "completed_count": len(items),
+        "items": items,
+        "incomplete_excluded_count": incomplete_count,
+    }
+
+
+class CvReprocessIn(BaseModel):
+    reference_application_id: str
+    expected_count: int
+
+
+@router.post(
+    "/maintenance/cv-reprocess",
+    dependencies=[Depends(require_superadmin)],
+)
+def maintenance_cv_reprocess(payload: CvReprocessIn, db: Session = Depends(get_db)):
+    """Aplica el reprocesado (OCR + LLM + recalculo) sobre el lote completado.
+
+    expected_count debe coincidir EXACTAMENTE con lo encontrado o se aborta sin
+    tocar nada (misma guarda de seguridad que el script de linea de comandos).
+    Cada candidatura se procesa en su propia transaccion: un fallo puntual no
+    revierte las que ya se guardaron correctamente.
+    """
+    try:
+        reference, items, incomplete_count = completed_scope(
+            db, payload.reference_application_id
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    if len(items) != payload.expected_count:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Se esperaban {payload.expected_count} candidaturas, pero se "
+                f"encontraron {len(items)}. No se ha modificado nada."
+            ),
+        )
+
+    service = RecruitmentService()
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+
+    for item in items:
+        application_id = item["application_id"]
+        # Sesion independiente por candidatura: igual que el script CLI, para
+        # que un fallo en una no arrastre un rollback de las demas.
+        item_db = SessionLocal()
+        try:
+            result = reprocess_one(item_db, service, application_id)
+            item_db.commit()
+            results.append(result)
+        except Exception as exc:
+            item_db.rollback()
+            failures.append({"application_id": application_id, "error": str(exc)})
+        finally:
+            item_db.close()
+
+    return {
+        "tenant_id": str(reference.tenant_id),
+        "vacancy_id": str(reference.vacancy_id),
+        "processed_count": len(results),
+        "failed_count": len(failures),
+        "results": results,
+        "failures": failures,
+    }
 
 
 # ── Conversaciones con candidatos (transcripcion) ─────────────────────
