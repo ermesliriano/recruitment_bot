@@ -52,11 +52,22 @@ class TwilioWhatsAppGateway(MessagingGateway):
 
     @classmethod
     def from_tenant(cls, tenant) -> "TwilioWhatsAppGateway":
+        # Si la empresa tiene numero remitente propio (Perfil de la empresa) y no
+        # tiene Messaging Service propio, ese numero manda: NO se hereda el
+        # Messaging Service global del entorno (enviaria desde otro numero).
+        tenant_from = (tenant.whatsapp_sender_address or "").strip() or None
+        if tenant_from and not tenant.whatsapp_messaging_service_sid:
+            messaging_service_sid = None
+        else:
+            messaging_service_sid = (
+                tenant.whatsapp_messaging_service_sid
+                or settings.twilio_whatsapp_messaging_service_sid
+            )
         return cls(
             account_sid=settings.twilio_account_sid,
             auth_token=settings.twilio_auth_token,
-            messaging_service_sid=tenant.whatsapp_messaging_service_sid or settings.twilio_whatsapp_messaging_service_sid,
-            from_address=tenant.whatsapp_sender_address or settings.twilio_whatsapp_from_address,
+            messaging_service_sid=messaging_service_sid,
+            from_address=tenant_from or settings.twilio_whatsapp_from_address,
         )
 
     @staticmethod

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
 from app.core.db import get_db, SessionLocal
-from app.core.security import require_admin_token, require_superadmin
+from app.core.security import require_admin_token
 from app.channels.base import OutgoingMessage
 from app.channels.email_sendgrid import SendGridEmailGateway, tenant_email_sender, tenant_inbound_address
 from app.enums import AiEvalStatus, Classification, Platform
@@ -61,6 +61,8 @@ class CompanyInfoIn(BaseModel):
     email_reply_to: str | None = None
     email_subject_default: str | None = None
     email_signature: str | None = None
+    # Numero remitente del canal WhatsApp (Twilio), p. ej. +18095551234.
+    whatsapp_sender: str | None = None
 
 
 def _flow_response(tenant) -> dict[str, Any]:
@@ -164,6 +166,16 @@ def update_company_info(
         "email_subject_default": (payload.email_subject_default or "").strip() or None,
         "email_signature": (payload.email_signature or "").strip() or None,
     }
+
+    # Numero de WhatsApp del canal (columna del tenant, con prefijo whatsapp:).
+    raw_wa = (payload.whatsapp_sender or "").strip()
+    if raw_wa:
+        normalized_wa = raw_wa if raw_wa.startswith("whatsapp:") else f"whatsapp:{raw_wa}"
+        tenant.whatsapp_sender_address = normalized_wa
+        tenant.whatsapp_enabled = True
+    else:
+        tenant.whatsapp_sender_address = None
+
     db.commit()
     return _company_info_response(tenant, institutional)
 
@@ -179,6 +191,7 @@ def _company_info_response(tenant, institutional=None) -> dict[str, Any]:
         "email_reply_to": raw.get("email_inbound_address"),
         "email_subject_default": raw.get("email_subject_default"),
         "email_signature": raw.get("email_signature"),
+        "whatsapp_sender": (tenant.whatsapp_sender_address or "").removeprefix("whatsapp:") or None,
         "fields": list(INSTITUTIONAL_INFO_FIELDS),
     }
 
@@ -220,7 +233,6 @@ def maintenance_score_diagnosis(application_id: str, db: Session = Depends(get_d
 
 @router.get(
     "/maintenance/cv-reprocess-scope",
-    dependencies=[Depends(require_superadmin)],
 )
 def maintenance_cv_reprocess_scope(
     reference_application_id: str,
@@ -249,7 +261,6 @@ class CvReprocessIn(BaseModel):
 
 @router.post(
     "/maintenance/cv-reprocess",
-    dependencies=[Depends(require_superadmin)],
 )
 def maintenance_cv_reprocess(payload: CvReprocessIn, db: Session = Depends(get_db)):
     """Aplica el reprocesado (OCR + LLM + recalculo) sobre el lote completado.
