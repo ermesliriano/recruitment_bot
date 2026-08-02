@@ -1,0 +1,627 @@
+From 0f6ea7a55a222526bf8bbd7e1639f0c0664d609f Mon Sep 17 00:00:00 2001
+From: Ermes Liriano <ermesliriano@mercedarios.net>
+Date: Fri, 24 Jul 2026 12:39:56 +0200
+Subject: [PATCH 2/3] added roles managing feature
+
+---
+ app/channels/whatsapp_twilio.py |  15 +++-
+ app/core/config.py              |   2 +
+ app/core/security.py            | 147 +++++++++++++++++++++++++++++++-
+ app/main.py                     |   2 +
+ app/models/__init__.py          |   1 +
+ app/models/user.py              |  29 +++++++
+ app/routers/admin.py            | 127 ++++++++++++++++++++++++++-
+ app/routers/auth.py             | 123 ++++++++++++++++++++++++++
+ sql/011_users.sql               |  23 +++++
+ 9 files changed, 462 insertions(+), 7 deletions(-)
+ create mode 100644 app/models/user.py
+ create mode 100644 app/routers/auth.py
+ create mode 100644 sql/011_users.sql
+
+diff --git a/app/channels/whatsapp_twilio.py b/app/channels/whatsapp_twilio.py
+index 27d340f..3172690 100644
+--- a/app/channels/whatsapp_twilio.py
++++ b/app/channels/whatsapp_twilio.py
+@@ -52,11 +52,22 @@ class TwilioWhatsAppGateway(MessagingGateway):
+ 
+     @classmethod
+     def from_tenant(cls, tenant) -> "TwilioWhatsAppGateway":
++        # Si la empresa tiene numero remitente propio (Perfil de la empresa) y no
++        # tiene Messaging Service propio, ese numero manda: NO se hereda el
++        # Messaging Service global del entorno (enviaria desde otro numero).
++        tenant_from = (tenant.whatsapp_sender_address or "").strip() or None
++        if tenant_from and not tenant.whatsapp_messaging_service_sid:
++            messaging_service_sid = None
++        else:
++            messaging_service_sid = (
++                tenant.whatsapp_messaging_service_sid
++                or settings.twilio_whatsapp_messaging_service_sid
++            )
+         return cls(
+             account_sid=settings.twilio_account_sid,
+             auth_token=settings.twilio_auth_token,
+-            messaging_service_sid=tenant.whatsapp_messaging_service_sid or settings.twilio_whatsapp_messaging_service_sid,
+-            from_address=tenant.whatsapp_sender_address or settings.twilio_whatsapp_from_address,
++            messaging_service_sid=messaging_service_sid,
++            from_address=tenant_from or settings.twilio_whatsapp_from_address,
+         )
+ 
+     @staticmethod
+diff --git a/app/core/config.py b/app/core/config.py
+index 22c26d9..8cb4188 100644
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -7,6 +7,8 @@ class Settings(BaseSettings):
+     database_url: str
+ 
+     admin_token: str = "change-me"
++    # Secreto de firma de los tokens de usuario (fallback: admin_token).
++    auth_secret: str = ""
+     allow_origins: str = "*"
+     public_base_url: str | None = None
+ 
+diff --git a/app/core/security.py b/app/core/security.py
+index b0f2039..fb4c4f9 100644
+--- a/app/core/security.py
++++ b/app/core/security.py
+@@ -1,17 +1,156 @@
+ # app/core/security.py
+-from fastapi import Depends, HTTPException, status
++"""
++Autenticación y autorización.
++
++Modos de acceso aceptados (cabecera Authorization: Bearer <token>):
++  1. ADMIN_TOKEN legado (variable de entorno): rol superadmin. Se mantiene para
++     compatibilidad con integraciones (cron de importaciones programadas, etc.).
++  2. Token de usuario firmado (HMAC-SHA256, sin dependencias externas), emitido
++     por POST /auth/login con caducidad. Payload: uid, role, tid (tenant), exp.
++
++Reglas de autorización por rol:
++  - superadmin: sin restricciones.
++  - company: solo endpoints cuyo tenant_id (en path o query) coincida con el
++    suyo. Endpoints sin tenant_id (mantenimiento, gestión de empresas/usuarios)
++    quedan reservados a superadmin.
++
++Contraseñas: PBKDF2-SHA256 (stdlib) con salt aleatorio por usuario.
++"""
++from __future__ import annotations
++
++import base64
++import hashlib
++import hmac
++import json
++import secrets
++import time
++from dataclasses import dataclass
++
++from fastapi import Depends, HTTPException, Request, status
+ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+ 
+ from app.core.config import settings
+ 
+ _bearer = HTTPBearer()
+ 
++PBKDF2_ITERATIONS = 260_000
++TOKEN_TTL_SECONDS = 7 * 24 * 3600  # 7 dias
++
++
++# ── Contraseñas ───────────────────────────────────────────────────────────────
++
++def hash_password(password: str) -> str:
++    salt = secrets.token_hex(16)
++    digest = hashlib.pbkdf2_hmac(
++        "sha256", password.encode(), bytes.fromhex(salt), PBKDF2_ITERATIONS
++    ).hex()
++    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${digest}"
++
++
++def verify_password(password: str, stored: str) -> bool:
++    try:
++        scheme, iterations, salt, digest = (stored or "").split("$", 3)
++        if scheme != "pbkdf2_sha256":
++            return False
++        candidate = hashlib.pbkdf2_hmac(
++            "sha256", password.encode(), bytes.fromhex(salt), int(iterations)
++        ).hex()
++        return hmac.compare_digest(candidate, digest)
++    except (ValueError, TypeError):
++        return False
++
++
++# ── Tokens de usuario ─────────────────────────────────────────────────────────
++
++def _signing_secret() -> bytes:
++    return (settings.auth_secret or settings.admin_token or "").encode()
++
++
++def _sign(raw: bytes) -> str:
++    return hmac.new(_signing_secret(), raw, hashlib.sha256).hexdigest()
++
++
++def issue_user_token(*, user_id: str, role: str, tenant_id: str | None) -> str:
++    payload = {
++        "uid": str(user_id),
++        "role": role,
++        "tid": str(tenant_id) if tenant_id else None,
++        "exp": int(time.time()) + TOKEN_TTL_SECONDS,
++    }
++    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode())
++    return f"{raw.decode()}.{_sign(raw)}"
++
++
++def verify_user_token(token: str) -> dict | None:
++    """Devuelve el payload si el token es válido y no ha caducado; si no, None."""
++    try:
++        raw_b64, signature = token.rsplit(".", 1)
++        raw = raw_b64.encode()
++        if not hmac.compare_digest(_sign(raw), signature):
++            return None
++        payload = json.loads(base64.urlsafe_b64decode(raw))
++        if int(payload.get("exp", 0)) < int(time.time()):
++            return None
++        if payload.get("role") not in ("superadmin", "company"):
++            return None
++        return payload
++    except Exception:
++        return None
++
++
++# ── Principal y dependencias ──────────────────────────────────────────────────
++
++@dataclass
++class AuthPrincipal:
++    role: str  # "superadmin" | "company"
++    user_id: str | None = None
++    tenant_id: str | None = None
++    is_service_token: bool = False  # ADMIN_TOKEN legado
++
+ 
+ def require_admin_token(
++    request: Request,
+     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+-) -> None:
+-    if credentials.credentials != settings.admin_token:
++) -> AuthPrincipal:
++    token = credentials.credentials
++
++    # 1) Token de servicio legado → superadmin (integraciones/cron).
++    if settings.admin_token and hmac.compare_digest(token, settings.admin_token):
++        return AuthPrincipal(role="superadmin", is_service_token=True)
++
++    # 2) Token de usuario firmado.
++    payload = verify_user_token(token)
++    if payload is None:
+         raise HTTPException(
+             status_code=status.HTTP_401_UNAUTHORIZED,
+-            detail="Token de administrador inválido",
++            detail="Token inválido o caducado",
++        )
++
++    principal = AuthPrincipal(
++        role=payload["role"],
++        user_id=payload.get("uid"),
++        tenant_id=payload.get("tid"),
++    )
++
++    if principal.role == "superadmin":
++        return principal
++
++    # Rol company: el endpoint debe referirse a SU empresa.
++    scoped_tenant = request.path_params.get("tenant_id") or request.query_params.get("tenant_id")
++    if not scoped_tenant or str(scoped_tenant).strip().lower() != str(principal.tenant_id or "").lower():
++        raise HTTPException(
++            status_code=status.HTTP_403_FORBIDDEN,
++            detail="No tienes permisos sobre esta empresa.",
++        )
++    return principal
++
++
++def require_superadmin(
++    principal: AuthPrincipal = Depends(require_admin_token),
++) -> AuthPrincipal:
++    if principal.role != "superadmin":
++        raise HTTPException(
++            status_code=status.HTTP_403_FORBIDDEN,
++            detail="Esta operación requiere rol de administrador general.",
+         )
++    return principal
+diff --git a/app/main.py b/app/main.py
+index 7875619..0d3d429 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
+ from app.core.config import settings
+ from app.routers import (
+     admin,
++    auth,
+     cv_imports,
+     internal,
+     questions,
+@@ -29,6 +30,7 @@ app.add_middleware(
+ 
+ 
+ # ── Routers ───────────────────────────────────────────────────────────────────
++app.include_router(auth.router)
+ app.include_router(webhook.router)
+ app.include_router(cv_imports.router)
+ app.include_router(internal.router)
+diff --git a/app/models/__init__.py b/app/models/__init__.py
+index b0d0ace..b9c7c06 100644
+--- a/app/models/__init__.py
++++ b/app/models/__init__.py
+@@ -13,4 +13,5 @@ from app.models.question import Question, TenantQuestion, VacancyQuestion  # noq
+ from app.models.scoring_rule import ScoringRule  # noqa: F401
+ from app.models.session import ConversationSession, SystemLog  # noqa: F401
+ from app.models.tenant import Tenant  # noqa: F401
++from app.models.user import User  # noqa: F401
+ from app.models.vacancy import Vacancy  # noqa: F401
+\ No newline at end of file
+diff --git a/app/models/user.py b/app/models/user.py
+new file mode 100644
+index 0000000..6cca353
+--- /dev/null
++++ b/app/models/user.py
+@@ -0,0 +1,29 @@
++# app/models/user.py
++from __future__ import annotations
++
++from typing import Any
++
++from sqlalchemy import Boolean, DateTime, String, Text, text
++from sqlalchemy.dialects.postgresql import UUID
++from sqlalchemy.orm import Mapped, mapped_column
++from sqlalchemy.sql import func
++
++from app.core.db import Base
++
++
++class User(Base):
++    """Usuario del panel. Roles:
++    - superadmin: acceso total (todas las empresas, crear empresas/usuarios).
++    - company: solo su empresa (tenant_id obligatorio).
++    """
++
++    __tablename__ = "users"
++
++    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
++    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
++    password_hash: Mapped[str] = mapped_column(Text)
++    role: Mapped[str] = mapped_column(String(20))
++    tenant_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
++    full_name: Mapped[str | None] = mapped_column(String(255))
++    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
++    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
+diff --git a/app/routers/admin.py b/app/routers/admin.py
+index 09bb607..636a27e 100644
+--- a/app/routers/admin.py
++++ b/app/routers/admin.py
+@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
+ from fastapi.responses import Response
+ 
+ from app.core.db import get_db
+-from app.core.security import require_admin_token
++from app.core.security import require_admin_token, require_superadmin, hash_password
+ from app.channels.base import OutgoingMessage
+ from app.channels.email_sendgrid import SendGridEmailGateway, tenant_email_sender, tenant_inbound_address
+ from app.enums import AiEvalStatus, Classification, Platform
+@@ -22,6 +22,7 @@ from app.models.outbound_message import OutboundMessage
+ from app.models.question import Question, TenantQuestion, VacancyQuestion
+ from app.models.session import ConversationSession
+ from app.models.tenant import Tenant
++from app.models.user import User
+ from app.models.vacancy import Vacancy
+ from app.schemas.application import ApplicationOut
+ from app.schemas.ranking import RankingRow
+@@ -59,6 +60,8 @@ class CompanyInfoIn(BaseModel):
+     email_reply_to: str | None = None
+     email_subject_default: str | None = None
+     email_signature: str | None = None
++    # Numero remitente del canal WhatsApp (Twilio), p. ej. +18095551234.
++    whatsapp_sender: str | None = None
+ 
+ 
+ def _flow_response(tenant) -> dict[str, Any]:
+@@ -162,6 +165,16 @@ def update_company_info(
+         "email_subject_default": (payload.email_subject_default or "").strip() or None,
+         "email_signature": (payload.email_signature or "").strip() or None,
+     }
++
++    # Numero de WhatsApp del canal (columna del tenant, con prefijo whatsapp:).
++    raw_wa = (payload.whatsapp_sender or "").strip()
++    if raw_wa:
++        normalized_wa = raw_wa if raw_wa.startswith("whatsapp:") else f"whatsapp:{raw_wa}"
++        tenant.whatsapp_sender_address = normalized_wa
++        tenant.whatsapp_enabled = True
++    else:
++        tenant.whatsapp_sender_address = None
++
+     db.commit()
+     return _company_info_response(tenant, institutional)
+ 
+@@ -177,6 +190,7 @@ def _company_info_response(tenant, institutional=None) -> dict[str, Any]:
+         "email_reply_to": raw.get("email_inbound_address"),
+         "email_subject_default": raw.get("email_subject_default"),
+         "email_signature": raw.get("email_signature"),
++        "whatsapp_sender": (tenant.whatsapp_sender_address or "").removeprefix("whatsapp:") or None,
+         "fields": list(INSTITUTIONAL_INFO_FIELDS),
+     }
+ 
+@@ -639,6 +653,117 @@ def vacancy_ranking(tenant_id: str, vacancy_id: str, db: Session = Depends(get_d
+     }
+ 
+ 
++# ── Gestion de empresas y usuarios (solo superadmin) ────────────────
++
++class TenantCreateIn(BaseModel):
++    name: str
++    slug: str | None = None
++
++
++class UserCreateIn(BaseModel):
++    email: str
++    password: str
++    role: Literal["superadmin", "company"]
++    tenant_id: str | None = None
++    full_name: str | None = None
++
++
++def _slugify_tenant(name: str) -> str:
++    import re as _re
++    import unicodedata as _ud
++
++    base = _ud.normalize("NFD", name or "").encode("ascii", "ignore").decode()
++    base = _re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
++    return base[:60] or "empresa"
++
++
++@router.get("/tenants", dependencies=[Depends(require_superadmin)])
++def list_tenants(db: Session = Depends(get_db)):
++    rows = db.execute(
++        select(Tenant.id, Tenant.slug, Tenant.name, Tenant.is_active).order_by(Tenant.name)
++    ).all()
++    return {
++        "items": [
++            {"id": str(tid), "slug": slug, "name": name, "is_active": active}
++            for tid, slug, name, active in rows
++        ]
++    }
++
++
++@router.post("/tenants", dependencies=[Depends(require_superadmin)])
++def create_tenant(payload: TenantCreateIn, db: Session = Depends(get_db)):
++    name = (payload.name or "").strip()
++    if not name:
++        raise HTTPException(status_code=422, detail="El nombre de la empresa es obligatorio.")
++
++    slug = (payload.slug or "").strip().lower() or _slugify_tenant(name)
++    existing = db.execute(select(Tenant).where(Tenant.slug == slug)).scalar_one_or_none()
++    if existing is not None:
++        raise HTTPException(status_code=422, detail=f"Ya existe una empresa con el identificador '{slug}'.")
++
++    tenant = Tenant(name=name, slug=slug, settings_json={})
++    db.add(tenant)
++    db.commit()
++    db.refresh(tenant)
++    return {"id": str(tenant.id), "slug": tenant.slug, "name": tenant.name, "is_active": tenant.is_active}
++
++
++@router.get("/users", dependencies=[Depends(require_superadmin)])
++def list_users(db: Session = Depends(get_db)):
++    rows = db.execute(select(User).order_by(User.created_at)).scalars().all()
++    tenant_names = {
++        str(tid): name
++        for tid, name in db.execute(select(Tenant.id, Tenant.name)).all()
++    }
++    return {
++        "items": [
++            {
++                "id": str(u.id),
++                "email": u.email,
++                "full_name": u.full_name,
++                "role": u.role,
++                "tenant_id": str(u.tenant_id) if u.tenant_id else None,
++                "tenant_name": tenant_names.get(str(u.tenant_id)) if u.tenant_id else None,
++                "is_active": u.is_active,
++            }
++            for u in rows
++        ]
++    }
++
++
++@router.post("/users", dependencies=[Depends(require_superadmin)])
++def create_user(payload: UserCreateIn, db: Session = Depends(get_db)):
++    email = (payload.email or "").strip().lower()
++    if not email or "@" not in email:
++        raise HTTPException(status_code=422, detail="Email no válido.")
++    if len(payload.password or "") < 8:
++        raise HTTPException(status_code=422, detail="La contraseña debe tener al menos 8 caracteres.")
++
++    existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
++    if existing is not None:
++        raise HTTPException(status_code=422, detail="Ya existe un usuario con ese email.")
++
++    tenant_id = (payload.tenant_id or "").strip() or None
++    if payload.role == "company":
++        if not tenant_id:
++            raise HTTPException(status_code=422, detail="Los usuarios de empresa requieren una empresa asignada.")
++        tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
++        if tenant is None:
++            raise HTTPException(status_code=404, detail="Empresa no encontrada.")
++
++    user = User(
++        email=email,
++        password_hash=hash_password(payload.password),
++        role=payload.role,
++        tenant_id=tenant_id if payload.role == "company" else None,
++        full_name=(payload.full_name or "").strip() or None,
++    )
++    db.add(user)
++    db.commit()
++    db.refresh(user)
++    return {"id": str(user.id), "email": user.email, "role": user.role}
++
++
+ @router.get("/tenants/{tenant_id}/applications/{application_id}/cv-file")
+ def application_cv_file(tenant_id: str, application_id: str, db: Session = Depends(get_db)):
+     """Devuelve el fichero ORIGINAL del CV (pdf/imagen/doc) de la candidatura.
+diff --git a/app/routers/auth.py b/app/routers/auth.py
+new file mode 100644
+index 0000000..1cc03ca
+--- /dev/null
++++ b/app/routers/auth.py
+@@ -0,0 +1,123 @@
++# app/routers/auth.py
++"""
++Autenticación de usuarios del panel.
++
++- GET  /auth/bootstrap-status : ¿hace falta crear el primer superadmin?
++- POST /auth/bootstrap        : crea el PRIMER superadmin (solo con tabla vacía).
++- POST /auth/login            : email + contraseña → token firmado + perfil.
++- GET  /auth/me               : perfil del usuario del token (restaurar sesión).
++"""
++from __future__ import annotations
++
++from fastapi import APIRouter, Depends, HTTPException
++from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
++from pydantic import BaseModel
++from sqlalchemy import func, select
++from sqlalchemy.orm import Session
++
++from app.core.db import get_db
++from app.core.security import (
++    hash_password,
++    issue_user_token,
++    verify_password,
++    verify_user_token,
++)
++from app.models.tenant import Tenant
++from app.models.user import User
++
++router = APIRouter(prefix="/auth", tags=["Auth"])
++_bearer = HTTPBearer()
++
++
++class BootstrapIn(BaseModel):
++    email: str
++    password: str
++    full_name: str | None = None
++
++
++class LoginIn(BaseModel):
++    email: str
++    password: str
++
++
++def _user_payload(db: Session, user: User) -> dict:
++    tenant_name = None
++    if user.tenant_id:
++        tenant_name = db.execute(
++            select(Tenant.name).where(Tenant.id == user.tenant_id)
++        ).scalar_one_or_none()
++    return {
++        "id": str(user.id),
++        "email": user.email,
++        "full_name": user.full_name,
++        "role": user.role,
++        "tenant_id": str(user.tenant_id) if user.tenant_id else None,
++        "tenant_name": tenant_name,
++    }
++
++
++@router.get("/bootstrap-status")
++def bootstrap_status(db: Session = Depends(get_db)):
++    total = db.execute(select(func.count()).select_from(User)).scalar_one()
++    return {"needs_bootstrap": total == 0}
++
++
++@router.post("/bootstrap")
++def bootstrap(payload: BootstrapIn, db: Session = Depends(get_db)):
++    total = db.execute(select(func.count()).select_from(User)).scalar_one()
++    if total > 0:
++        raise HTTPException(
++            status_code=403,
++            detail="Ya existen usuarios: el administrador inicial solo puede crearse con la tabla vacía.",
++        )
++
++    email = payload.email.strip().lower()
++    if not email or "@" not in email:
++        raise HTTPException(status_code=422, detail="Email no válido.")
++    if len(payload.password or "") < 8:
++        raise HTTPException(status_code=422, detail="La contraseña debe tener al menos 8 caracteres.")
++
++    user = User(
++        email=email,
++        password_hash=hash_password(payload.password),
++        role="superadmin",
++        full_name=(payload.full_name or "").strip() or None,
++    )
++    db.add(user)
++    db.commit()
++    db.refresh(user)
++
++    token = issue_user_token(user_id=str(user.id), role=user.role, tenant_id=None)
++    return {"token": token, "user": _user_payload(db, user)}
++
++
++@router.post("/login")
++def login(payload: LoginIn, db: Session = Depends(get_db)):
++    email = payload.email.strip().lower()
++    user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
++
++    if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):
++        raise HTTPException(status_code=401, detail="Credenciales incorrectas.")
++
++    token = issue_user_token(
++        user_id=str(user.id),
++        role=user.role,
++        tenant_id=str(user.tenant_id) if user.tenant_id else None,
++    )
++    return {"token": token, "user": _user_payload(db, user)}
++
++
++@router.get("/me")
++def me(
++    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
++    db: Session = Depends(get_db),
++):
++    payload = verify_user_token(credentials.credentials)
++    if payload is None:
++        raise HTTPException(status_code=401, detail="Token inválido o caducado")
++
++    user = db.execute(select(User).where(User.id == payload["uid"])).scalar_one_or_none()
++    if user is None or not user.is_active:
++        raise HTTPException(status_code=401, detail="Usuario no disponible")
++
++    return {"user": _user_payload(db, user)}
+diff --git a/sql/011_users.sql b/sql/011_users.sql
+new file mode 100644
+index 0000000..d1a3592
+--- /dev/null
++++ b/sql/011_users.sql
+@@ -0,0 +1,23 @@
++-- 011_users.sql
++-- Sistema de usuarios y roles.
++--
++--  - superadmin: acceso total, todas las empresas, crear empresas y usuarios.
++--  - company: acceso restringido a su propia empresa (tenant_id obligatorio).
++--
++-- El primer superadmin se crea via POST /auth/bootstrap (solo funciona cuando
++-- la tabla esta vacia). Aplicar manualmente en Render antes de desplegar.
++
++CREATE TABLE IF NOT EXISTS users (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    email VARCHAR(255) NOT NULL UNIQUE,
++    password_hash TEXT NOT NULL,
++    role VARCHAR(20) NOT NULL CHECK (role IN ('superadmin', 'company')),
++    tenant_id UUID REFERENCES tenants(id),
++    full_name VARCHAR(255),
++    is_active BOOLEAN NOT NULL DEFAULT true,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
++    CONSTRAINT company_requires_tenant
++        CHECK (role <> 'company' OR tenant_id IS NOT NULL)
++);
++
++CREATE INDEX IF NOT EXISTS idx_users_tenant ON users (tenant_id);
+-- 
+2.42.0.windows.1
+
