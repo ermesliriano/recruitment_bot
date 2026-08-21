@@ -40,5 +40,5 @@ services:
 databases:
   - name: recruitment-db
     plan: free
-    databaseName: recruitment_db_j8i4
+    databaseName: recruitment_db_j8i4_akrx
     user: recruitment_db_j8i4_user
